@@ -151,7 +151,7 @@ def get_media_type(message: types.Message) -> str:
 async def send_to_max(text: str, attachments: list = None, parse_mode: str = None):
     """
     Отправляет сообщение в MAX канал с поддержкой форматирования
-    parse_mode может быть 'markdown', 'html', или None для автоопределения
+    Используется РАБОЧИЙ формат: chat_id как строка (в кавычках)
     """
     url = "https://platform-api.max.ru/messages"
     headers = {
@@ -168,8 +168,11 @@ async def send_to_max(text: str, attachments: list = None, parse_mode: str = Non
     if attachments:
         message_data["attachments"] = attachments
     
+    # ВАЖНО: chat_id передаём как СТРОКУ (именно так работало раньше)
     data = {
-        "recipient": {"chat_id": MAX_CHANNEL_ID},
+        "recipient": {
+            "chat_id": str(MAX_CHANNEL_ID)  # Принудительно как строка
+        },
         "message": message_data
     }
     
