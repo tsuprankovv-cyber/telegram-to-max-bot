@@ -1,14 +1,12 @@
 import os
 import asyncio
 import logging
-import aiohttp
-import json
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from maxapi import Bot as MaxBot
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Получаем токены из переменных окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -16,79 +14,56 @@ TELEGRAM_GROUP_ID = int(os.getenv('TELEGRAM_GROUP_ID'))
 MAX_TOKEN = os.getenv('MAX_TOKEN')
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
 
+# Инициализация ботов
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
+max_bot = MaxBot(token=MAX_TOKEN)
 dp = Dispatcher()
-
-async def send_to_max(text: str):
-    """
-    МАКСИМАЛЬНО ПРОСТАЯ отправка сообщения в MAX канал
-    """
-    url = "https://platform-api.max.ru/messages"
-    headers = {
-        "Authorization": MAX_TOKEN,
-        "Content-Type": "application/json"
-    }
-    
-    # Минимальные данные для отправки
-    data = {
-        "recipient": {
-            "chat_id": str(MAX_CHANNEL_ID)
-        },
-        "message": {
-            "text": text
-        }
-    }
-    
-    logger.info(f"📤 Отправка в MAX: {json.dumps(data)}")
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, json=data) as resp:
-                response_text = await resp.text()
-                logger.info(f"📥 Ответ от MAX: статус {resp.status}, тело: {response_text}")
-                
-                if resp.status == 200:
-                    logger.info("✅ Успешно отправлено")
-                    return True
-                else:
-                    logger.error(f"❌ Ошибка: {resp.status}")
-                    return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка соединения: {e}")
-            return False
 
 @dp.message()
 async def forward_to_max(message: types.Message):
-    """Пересылает сообщение в MAX"""
+    """Пересылает все сообщения из Telegram-группы в MAX-канал"""
     
+    # Проверяем, что сообщение из нужной группы
     if message.chat.id != TELEGRAM_GROUP_ID:
         return
     
     try:
-        sender = message.from_user
-        logger.info(f"📨 Получено от {sender.full_name or sender.username} (бот: {sender.is_bot})")
+        # Формируем текст сообщения
+        sender_name = message.from_user.full_name or message.from_user.username or "Пользователь"
+        text = f"💬 {sender_name}:\n{message.text or ''}"
         
-        # Берём только текст
-        text = message.text or message.caption or "Сообщение без текста"
+        # Если есть текст
+        if message.text:
+            await max_bot.send_message(
+                chat_id=MAX_CHANNEL_ID,
+                text=text
+            )
+            logging.info(f"Текст переслан от {message.from_user.id}")
         
-        # Отправляем
-        success = await send_to_max(text)
-        
-        if success:
-            logger.info("✅ Сообщение переслано")
-        else:
-            logger.error("❌ Не удалось переслать")
+        # Если есть фото
+        elif message.photo:
+            photo = message.photo[-1]
+            file = await telegram_bot.get_file(photo.file_id)
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file.file_path}"
+            
+            await max_bot.send_photo(
+                chat_id=MAX_CHANNEL_ID,
+                photo=file_url,
+                caption=text
+            )
+            logging.info(f"Фото переслано от {message.from_user.id}")
         
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logging.error(f"Ошибка при пересылке: {e}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("✅ Бот запущен в тестовом режиме")
+    """Обработчик команды /start"""
+    await message.answer("✅ Бот запущен и готов пересылать сообщения из группы в MAX!")
 
 async def main():
-    logger.info("🚀 Тестовый бот запускается...")
-    await telegram_bot.delete_webhook()
+    """Запуск бота"""
+    logging.info("Бот запускается...")
     await dp.start_polling(telegram_bot)
 
 if __name__ == '__main__':
