@@ -25,10 +25,15 @@ def extract_urls_from_text(text):
     return re.findall(url_pattern, text)
 
 async def send_to_max_channel(text: str, photo_url: str = None, telegram_buttons=None):
-    """Отправляет сообщение в канал MAX с поддержкой кнопок."""
-    url = "https://api.max.ru/v1/messages"
+    """
+    Отправляет сообщение в канал MAX через новый API (platform-api.max.ru)
+    """
+    # НОВЫЙ АДРЕС API MAX
+    url = "https://platform-api.max.ru/messages"
+    
+    # НОВЫЙ ФОРМАТ АВТОРИЗАЦИИ: только токен, без Bearer
     headers = {
-        "Authorization": f"Bearer {MAX_TOKEN}",
+        "Authorization": f"{MAX_TOKEN}",
         "Content-Type": "application/json"
     }
     
@@ -72,7 +77,7 @@ async def send_to_max_channel(text: str, photo_url: str = None, telegram_buttons
                     "buttons": max_buttons
                 }
             })
-            logging.info(f"Добавлено {len(max_buttons)} рядов кнопок")
+            logging.info(f"🔘 Добавлено {len(max_buttons)} рядов кнопок")
 
     data = {
         "recipient": {
@@ -81,15 +86,22 @@ async def send_to_max_channel(text: str, photo_url: str = None, telegram_buttons
         "message": message_data
     }
     
+    # Логируем запрос для отладки
+    logging.info(f"📤 Отправка в MAX: URL={url}")
+    logging.info(f"📤 Headers: Authorization: {MAX_TOKEN[:10]}... (скрыто)")
+    logging.info(f"📤 Data: {json.dumps(data, ensure_ascii=False)[:200]}...")
+    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=data) as resp:
+                response_text = await resp.text()
+                
                 if resp.status == 200:
                     logging.info("✅ Сообщение успешно отправлено в MAX канал")
                     return True
                 else:
-                    error_text = await resp.text()
-                    logging.error(f"❌ Ошибка MAX API: {resp.status} - {error_text}")
+                    logging.error(f"❌ Ошибка MAX API: статус {resp.status}")
+                    logging.error(f"❌ Ответ сервера: {response_text}")
                     return False
         except Exception as e:
             logging.error(f"❌ Ошибка при отправке в MAX: {e}")
@@ -104,14 +116,15 @@ async def forward_to_max(message: types.Message):
         return
     
     try:
-        # Логируем информацию об отправителе
+        # Определяем тип отправителя
         sender_type = "бот" if message.from_user.is_bot else "пользователь"
-        logging.info(f"📨 Получено сообщение от {sender_type} @{message.from_user.username or 'без username'}")
+        sender_name = message.from_user.full_name or message.from_user.username or "без имени"
+        logging.info(f"📨 Получено сообщение от {sender_type} @{sender_name}")
         
         # --- 1. Формируем текст сообщения (чистый текст) ---
         text = message.text or message.caption or ''
         
-        # Проверяем, есть ли в тексте ссылки (просто для информации)
+        # Проверяем, есть ли в тексте ссылки
         urls = extract_urls_from_text(text)
         if urls:
             logging.info(f"🔗 Найдены ссылки в тексте: {urls}")
@@ -143,10 +156,10 @@ async def forward_to_max(message: types.Message):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("✅ Бот запущен и готов пересылать сообщения с ссылками и кнопками!")
+    await message.answer("✅ Бот запущен и работает с новым API MAX (platform-api.max.ru)!")
 
 async def main():
-    logging.info("🚀 Бот запускается...")
+    logging.info("🚀 Бот запускается с поддержкой нового API MAX...")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
