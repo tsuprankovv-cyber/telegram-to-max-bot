@@ -1,9 +1,9 @@
 import os
 import asyncio
 import logging
+import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from maxapi import Bot as MaxBot
 
 # === НАСТРОЙКА ПОДРОБНОГО ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -11,6 +11,90 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# === КЛАСС ДЛЯ РАБОТЫ С MAX API (ВСТРОЕН) ===
+class MaxBot:
+    def __init__(self, token: str):
+        self.token = token
+        self.base_url = "https://api.max.ru/v1"  # Если не работает, замените на актуальный URL
+        self.session = None
+        logger.info("✅ MaxBot инициализирован")
+        
+    async def _ensure_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+            
+    async def _request(self, endpoint: str, data: dict):
+        await self._ensure_session()
+        url = f"{self.base_url}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        
+        logger.debug(f"📤 Отправка запроса в MAX: {endpoint}")
+        async with self.session.post(url, headers=headers, json=data) as resp:
+            response = await resp.json()
+            logger.debug(f"📥 Ответ от MAX: {response}")
+            return response
+    
+    async def send_message(self, chat_id: str, text: str, reply_markup=None):
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await self._request("sendMessage", data)
+    
+    async def send_photo(self, chat_id: str, photo: str, caption=None, reply_markup=None):
+        data = {
+            "chat_id": chat_id,
+            "photo": photo,
+            "parse_mode": "HTML"
+        }
+        if caption:
+            data["caption"] = caption
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await self._request("sendPhoto", data)
+    
+    async def send_video(self, chat_id: str, video: str, caption=None, reply_markup=None):
+        data = {
+            "chat_id": chat_id,
+            "video": video,
+            "parse_mode": "HTML"
+        }
+        if caption:
+            data["caption"] = caption
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await self._request("sendVideo", data)
+    
+    async def send_voice(self, chat_id: str, voice: str, caption=None, reply_markup=None):
+        data = {
+            "chat_id": chat_id,
+            "voice": voice,
+            "parse_mode": "HTML"
+        }
+        if caption:
+            data["caption"] = caption
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await self._request("sendVoice", data)
+    
+    async def send_document(self, chat_id: str, document: str, caption=None, reply_markup=None):
+        data = {
+            "chat_id": chat_id,
+            "document": document,
+            "parse_mode": "HTML"
+        }
+        if caption:
+            data["caption"] = caption
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await self._request("sendDocument", data)
 
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -30,24 +114,21 @@ dp = Dispatcher()
 async def download_file(file_id: str) -> str:
     """Скачивает файл из Telegram и возвращает ссылку на него"""
     try:
-        logger.info(f"📥 Начинаем скачивание файла: {file_id}")
+        logger.info(f"📥 Скачивание файла: {file_id}")
         file = await telegram_bot.get_file(file_id)
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file.file_path}"
-        logger.info(f"✅ Файл успешно скачан: {file_url}")
-        logger.info(f"   Путь к файлу: {file.file_path}")
-        logger.info(f"   Размер файла: {file.file_size if hasattr(file, 'file_size') else 'неизвестно'} байт")
+        logger.info(f"✅ Файл скачан: {file_url}")
         return file_url
     except Exception as e:
-        logger.error(f"❌ Ошибка при скачивании файла {file_id}: {e}")
-        logger.exception("Детали ошибки:")
+        logger.error(f"❌ Ошибка скачивания: {e}")
         raise
 
 def extract_buttons(message: types.Message):
     """Извлекает кнопки-ссылки из сообщения"""
     buttons = []
     if message.reply_markup and message.reply_markup.inline_keyboard:
-        logger.info(f"🔘 Обнаружены кнопки: {len(message.reply_markup.inline_keyboard)} рядов")
-        for row_idx, row in enumerate(message.reply_markup.inline_keyboard):
+        logger.info(f"🔘 Найдены кнопки: {len(message.reply_markup.inline_keyboard)} рядов")
+        for row in message.reply_markup.inline_keyboard:
             button_row = []
             for button in row:
                 if button.url:
@@ -55,281 +136,100 @@ def extract_buttons(message: types.Message):
                         "text": button.text,
                         "url": button.url
                     })
-                    logger.info(f"   Кнопка {row_idx+1}: '{button.text}' -> {button.url}")
             if button_row:
                 buttons.append(button_row)
-        logger.info(f"✅ Всего кнопок для отправки: {sum(len(row) for row in buttons)}")
     return buttons
 
 @dp.message()
 async def forward_to_max(message: types.Message):
-    """Основной обработчик сообщений"""
-    
-    # === ПРОВЕРКА ИСТОЧНИКА ===
+    # Проверка источника
     if message.chat.id != TELEGRAM_GROUP_ID:
-        logger.debug(f"Сообщение из другого чата: {message.chat.id} (нужен: {TELEGRAM_GROUP_ID})")
         return
     
-    # === ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ СООБЩЕНИЯ ===
-    logger.info("="*70)
-    logger.info("📨 ПОЛУЧЕНО НОВОЕ СООБЩЕНИЕ ДЛЯ ПЕРЕСЫЛКИ")
-    logger.info("="*70)
+    # ПОДРОБНОЕ ЛОГИРОВАНИЕ
+    logger.info("="*60)
+    logger.info("📨 НОВОЕ СООБЩЕНИЕ:")
+    logger.info(f"🆔 ID: {message.message_id}")
+    logger.info(f"👤 От: {message.from_user.full_name} (ID: {message.from_user.id})")
     
-    # Базовая информация
-    logger.info(f"🆔 ID сообщения: {message.message_id}")
-    logger.info(f"👤 Отправитель: {message.from_user.full_name} (ID: {message.from_user.id})")
-    logger.info(f"🤖 Это бот: {message.from_user.is_bot}")
-    logger.info(f"📱 Username: @{message.from_user.username if message.from_user.username else 'нет'}")
-    logger.info(f"💬 Чат: {message.chat.title if message.chat.title else 'Личка'} (ID: {message.chat.id})")
-    logger.info(f"📌 Тип чата: {message.chat.type}")
-    logger.info(f"🕐 Время отправки: {message.date}")
-    
-    # === ИНФОРМАЦИЯ О ПЕРЕСЫЛКЕ (самое важное для нашей проблемы) ===
+    # Информация о пересылке
     if message.forward_date:
-        logger.info("🔄 ЭТО ПЕРЕСЛАННОЕ СООБЩЕНИЕ:")
-        logger.info(f"  📅 Оригинальная дата: {message.forward_date}")
-        
-        if message.forward_from:
-            logger.info(f"  👤 От пользователя: {message.forward_from.full_name}")
-            logger.info(f"  🆔 ID пользователя: {message.forward_from.id}")
-            logger.info(f"  📱 Username: @{message.forward_from.username if message.forward_from.username else 'нет'}")
-            
+        logger.info("🔄 ПЕРЕСЛАННОЕ:")
         if message.forward_from_chat:
-            logger.info(f"  📢 Из канала/чата: {message.forward_from_chat.title}")
-            logger.info(f"  🆔 ID канала: {message.forward_from_chat.id}")
-            logger.info(f"  📢 Username канала: @{message.forward_from_chat.username if message.forward_from_chat.username else 'нет'}")
-            
-        if message.forward_sender_name:
-            logger.info(f"  🏷 Скрытое имя: {message.forward_sender_name}")
-            
-        if message.forward_signature:
-            logger.info(f"  ✍️ Подпись: {message.forward_signature}")
-    else:
-        logger.info("📨 Обычное сообщение (не пересланное)")
+            logger.info(f"  📢 Из канала: {message.forward_from_chat.title}")
     
-    # === ТИП КОНТЕНТА ===
+    # Тип контента
     text = message.text or message.caption or ''
     if text:
-        logger.info(f"📝 Текст/подпись: {text[:200]}{'...' if len(text) > 200 else ''}")
+        logger.info(f"📝 Текст: {text[:100]}...")
     
-    # Фото
     if message.photo:
-        logger.info(f"🖼 ОБНАРУЖЕНО ФОТО:")
-        logger.info(f"   Количество версий: {len(message.photo)}")
-        for i, photo in enumerate(message.photo):
-            logger.info(f"   Версия {i+1}: {photo.width}x{photo.height}, file_id: {photo.file_id[:20]}...")
-        main_photo = message.photo[-1]
-        logger.info(f"   ✅ Используем версию: {main_photo.width}x{main_photo.height}")
-        logger.info(f"   🆔 file_id: {main_photo.file_id}")
-    
-    # Видео
+        logger.info(f"🖼 ФОТО: {len(message.photo)} версий")
+        photo = message.photo[-1]
+        logger.info(f"   file_id: {photo.file_id}")
     elif message.video:
-        logger.info(f"🎥 ОБНАРУЖЕНО ВИДЕО:")
-        logger.info(f"   Размер: {message.video.width}x{message.video.height}")
-        logger.info(f"   Длительность: {message.video.duration} сек")
-        logger.info(f"   🆔 file_id: {message.video.file_id}")
-        logger.info(f"   📁 MIME тип: {message.video.mime_type}")
-        logger.info(f"   💾 Размер файла: {message.video.file_size} байт")
-    
-    # Голосовое
+        logger.info(f"🎥 ВИДЕО")
     elif message.voice:
-        logger.info(f"🎤 ОБНАРУЖЕНО ГОЛОСОВОЕ:")
-        logger.info(f"   Длительность: {message.voice.duration} сек")
-        logger.info(f"   🆔 file_id: {message.voice.file_id}")
-    
-    # Документ
+        logger.info(f"🎤 ГОЛОСОВОЕ")
     elif message.document:
-        logger.info(f"📄 ОБНАРУЖЕН ДОКУМЕНТ:")
-        logger.info(f"   Имя файла: {message.document.file_name}")
-        logger.info(f"   🆔 file_id: {message.document.file_id}")
-        logger.info(f"   📁 MIME тип: {message.document.mime_type}")
-        logger.info(f"   💾 Размер: {message.document.file_size} байт")
-    
-    # Текст
+        logger.info(f"📄 ДОКУМЕНТ")
     elif message.text:
-        logger.info(f"📝 ОБНАРУЖЕН ТЕКСТ")
+        logger.info(f"📝 ТЕКСТ")
     
-    # Другие типы
-    elif message.sticker:
-        logger.info(f"🎯 ОБНАРУЖЕН СТИКЕР")
-    elif message.contact:
-        logger.info(f"👤 ОБНАРУЖЕН КОНТАКТ")
-    elif message.location:
-        logger.info(f"📍 ОБНАРУЖЕНА ЛОКАЦИЯ")
-    else:
-        logger.warning(f"⚠️ НЕИЗВЕСТНЫЙ ТИП СООБЩЕНИЯ")
+    logger.info("="*60)
     
-    # Альбом
-    if message.media_group_id:
-        logger.info(f"🖼👥 ЭТО АЛЬБОМ (группа медиа)")
-        logger.info(f"   ID группы: {message.media_group_id}")
-    
-    # Кнопки
-    buttons = extract_buttons(message)
-    
-    logger.info("="*70)
-    
-    # === НАЧАЛО ПЕРЕСЫЛКИ ===
+    # ПЕРЕСЫЛКА
     try:
-        # Формируем текст с информацией об источнике (если нужно)
+        # Текст с информацией об источнике
         final_text = text
         if message.forward_from_chat and text:
-            source_title = message.forward_from_chat.title or "канала"
-            final_text = f"📢 Переслано из {source_title}:\n\n{text}"
-            logger.info(f"📝 Добавлена информация об источнике: {source_title}")
-        elif message.forward_from and text:
-            source_name = message.forward_from.full_name or "пользователя"
-            final_text = f"👤 Переслано от {source_name}:\n\n{text}"
-            logger.info(f"📝 Добавлена информация об отправителе: {source_name}")
+            final_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{text}"
         
-        # Отправка в зависимости от типа
+        buttons = extract_buttons(message)
+        
         if message.photo:
-            logger.info("🔄 НАЧИНАЕМ ПЕРЕСЫЛКУ ФОТО...")
             photo = message.photo[-1]
             photo_url = await download_file(photo.file_id)
-            
-            logger.info(f"📤 Отправляем фото в MAX (канал: {MAX_CHANNEL_ID})")
-            if buttons:
-                result = await max_bot.send_photo(
-                    chat_id=MAX_CHANNEL_ID,
-                    photo=photo_url,
-                    caption=final_text,
-                    reply_markup={"inline_keyboard": buttons}
-                )
-            else:
-                result = await max_bot.send_photo(
-                    chat_id=MAX_CHANNEL_ID,
-                    photo=photo_url,
-                    caption=final_text
-                )
-            logger.info(f"✅ ФОТО УСПЕШНО ПЕРЕСЛАНО!")
-            logger.info(f"   Ответ от MAX API: {result}")
+            await max_bot.send_photo(MAX_CHANNEL_ID, photo_url, final_text, 
+                                    {"inline_keyboard": buttons} if buttons else None)
+            logger.info("✅ Фото переслано")
             
         elif message.video:
-            logger.info("🔄 НАЧИНАЕМ ПЕРЕСЫЛКУ ВИДЕО...")
             video_url = await download_file(message.video.file_id)
-            
-            logger.info(f"📤 Отправляем видео в MAX (канал: {MAX_CHANNEL_ID})")
-            if buttons:
-                result = await max_bot.send_video(
-                    chat_id=MAX_CHANNEL_ID,
-                    video=video_url,
-                    caption=final_text,
-                    reply_markup={"inline_keyboard": buttons}
-                )
-            else:
-                result = await max_bot.send_video(
-                    chat_id=MAX_CHANNEL_ID,
-                    video=video_url,
-                    caption=final_text
-                )
-            logger.info(f"✅ ВИДЕО УСПЕШНО ПЕРЕСЛАНО!")
-            logger.info(f"   Ответ от MAX API: {result}")
+            await max_bot.send_video(MAX_CHANNEL_ID, video_url, final_text,
+                                    {"inline_keyboard": buttons} if buttons else None)
+            logger.info("✅ Видео переслано")
             
         elif message.voice:
-            logger.info("🔄 НАЧИНАЕМ ПЕРЕСЫЛКУ ГОЛОСОВОГО...")
             voice_url = await download_file(message.voice.file_id)
-            
-            logger.info(f"📤 Отправляем голосовое в MAX (канал: {MAX_CHANNEL_ID})")
-            if buttons:
-                result = await max_bot.send_voice(
-                    chat_id=MAX_CHANNEL_ID,
-                    voice=voice_url,
-                    caption=final_text,
-                    reply_markup={"inline_keyboard": buttons}
-                )
-            else:
-                result = await max_bot.send_voice(
-                    chat_id=MAX_CHANNEL_ID,
-                    voice=voice_url,
-                    caption=final_text
-                )
-            logger.info(f"✅ ГОЛОСОВОЕ УСПЕШНО ПЕРЕСЛАНО!")
-            logger.info(f"   Ответ от MAX API: {result}")
+            await max_bot.send_voice(MAX_CHANNEL_ID, voice_url, final_text,
+                                    {"inline_keyboard": buttons} if buttons else None)
+            logger.info("✅ Голосовое переслано")
             
         elif message.document:
-            logger.info("🔄 НАЧИНАЕМ ПЕРЕСЫЛКУ ДОКУМЕНТА...")
             doc_url = await download_file(message.document.file_id)
-            
-            logger.info(f"📤 Отправляем документ в MAX (канал: {MAX_CHANNEL_ID})")
-            if buttons:
-                result = await max_bot.send_document(
-                    chat_id=MAX_CHANNEL_ID,
-                    document=doc_url,
-                    caption=final_text,
-                    reply_markup={"inline_keyboard": buttons}
-                )
-            else:
-                result = await max_bot.send_document(
-                    chat_id=MAX_CHANNEL_ID,
-                    document=doc_url,
-                    caption=final_text
-                )
-            logger.info(f"✅ ДОКУМЕНТ УСПЕШНО ПЕРЕСЛАН!")
-            logger.info(f"   Ответ от MAX API: {result}")
+            await max_bot.send_document(MAX_CHANNEL_ID, doc_url, final_text,
+                                      {"inline_keyboard": buttons} if buttons else None)
+            logger.info("✅ Документ переслан")
             
         elif message.text:
-            logger.info("🔄 НАЧИНАЕМ ПЕРЕСЫЛКУ ТЕКСТА...")
-            logger.info(f"📤 Отправляем текст в MAX (канал: {MAX_CHANNEL_ID})")
-            logger.info(f"   Текст: {final_text[:100]}{'...' if len(final_text) > 100 else ''}")
-            
-            if buttons:
-                result = await max_bot.send_message(
-                    chat_id=MAX_CHANNEL_ID,
-                    text=final_text,
-                    reply_markup={"inline_keyboard": buttons}
-                )
-            else:
-                result = await max_bot.send_message(
-                    chat_id=MAX_CHANNEL_ID,
-                    text=final_text
-                )
-            logger.info(f"✅ ТЕКСТ УСПЕШНО ПЕРЕСЛАН!")
-            logger.info(f"   Ответ от MAX API: {result}")
-            
-        else:
-            logger.warning(f"⚠️ Тип сообщения не поддерживается для пересылки")
+            await max_bot.send_message(MAX_CHANNEL_ID, final_text,
+                                     {"inline_keyboard": buttons} if buttons else None)
+            logger.info("✅ Текст переслан")
             
     except Exception as e:
-        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА ПРИ ПЕРЕСЫЛКЕ: {e}")
-        logger.exception("Детальный стек ошибки:")
+        logger.error(f"❌ Ошибка: {e}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
     await message.answer(
-        "✅ Бот-пересыльщик запущен в ТЕСТОВОМ режиме!\n\n"
-        f"📤 Откуда: группа с ID {TELEGRAM_GROUP_ID}\n"
-        f"📥 Куда: канал MAX с ID {MAX_CHANNEL_ID}\n\n"
-        "📋 Подробное логирование включено.\n"
-        "Отправьте тестовые сообщения в группу."
+        "✅ Бот-пересыльщик запущен\n"
+        f"📤 Откуда: группа {TELEGRAM_GROUP_ID}\n"
+        f"📥 Куда: канал {MAX_CHANNEL_ID}"
     )
 
-@dp.message(Command("test"))
-async def cmd_test(message: types.Message):
-    """Команда для проверки связи с MAX"""
-    await message.answer("🔄 Проверяю подключение к MAX API...")
-    try:
-        # Отправляем тестовое сообщение в MAX
-        result = await max_bot.send_message(
-            chat_id=MAX_CHANNEL_ID,
-            text="🔄 Тестовое сообщение от бота-пересыльщика"
-        )
-        await message.answer(f"✅ Подключение к MAX работает! Ответ: {result}")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка подключения к MAX: {e}")
-
 async def main():
-    """Запуск бота"""
-    logger.info("="*70)
-    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (ТЕСТОВЫЙ РЕЖИМ)")
-    logger.info("="*70)
-    logger.info(f"📤 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
-    logger.info(f"📥 MAX_CHANNEL_ID: {MAX_CHANNEL_ID}")
-    logger.info(f"🤖 TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:10]}...")
-    logger.info(f"🔑 MAX_TOKEN: {MAX_TOKEN[:10]}...")
-    logger.info("="*70)
-    
+    logger.info("🚀 Бот запускается...")
     await dp.start_polling(telegram_bot)
 
 if __name__ == '__main__':
