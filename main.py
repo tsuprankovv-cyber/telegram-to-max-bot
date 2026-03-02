@@ -56,6 +56,14 @@ class MaxBot:
         """Получение списка доступных чатов"""
         return await self._request("chats", method="GET")
     
+    async def get_chat_info(self, chat_id: str):
+        """Получение информации о конкретном чате"""
+        return await self._request(f"chats/{chat_id}", method="GET")
+    
+    async def get_chat_by_invite(self, invite_code: str):
+        """Получение информации о чате по инвайт-коду"""
+        return await self._request(f"chats/join/{invite_code}", method="GET")
+    
     async def send_message(self, chat_id: str, text: str, reply_markup=None):
         data = {
             "chat_id": chat_id,
@@ -172,16 +180,19 @@ async def cmd_get_my_chats(message: types.Message):
             result = "✅ **Доступные чаты:**\n\n"
             for chat in chats['chats']:
                 result += f"📌 **Название:** {chat.get('title', 'Без названия')}\n"
-                result += f"🆔 **ID:** `{chat.get('id')}`\n"
+                result += f"🆔 **ID:** `{chat.get('chat_id') or chat.get('id')}`\n"
                 result += f"📊 **Тип:** {chat.get('type', 'канал')}\n"
+                result += f"📊 **Статус:** {chat.get('status', 'неизвестно')}\n"
                 result += f"🔗 **Ссылка:** {chat.get('link', 'нет')}\n"
                 result += "-" * 30 + "\n"
         elif isinstance(chats, list):
             result = "✅ **Доступные чаты:**\n\n"
             for chat in chats:
                 result += f"📌 **Название:** {chat.get('title', 'Без названия')}\n"
-                result += f"🆔 **ID:** `{chat.get('id') or chat.get('chat_id')}`\n"
+                result += f"🆔 **ID:** `{chat.get('chat_id') or chat.get('id')}`\n"
                 result += f"📊 **Тип:** {chat.get('type', 'канал')}\n"
+                result += f"📊 **Статус:** {chat.get('status', 'неизвестно')}\n"
+                result += f"🔗 **Ссылка:** {chat.get('link', 'нет')}\n"
                 result += "-" * 30 + "\n"
         else:
             result = f"❌ Ответ от API: {chats}"
@@ -191,6 +202,30 @@ async def cmd_get_my_chats(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
         logger.error(f"Ошибка получения чатов: {e}")
+
+# === КОМАНДА ДЛЯ ПОЛУЧЕНИЯ ИНФОРМАЦИИ О ЧАТЕ ===
+@dp.message(Command("get_chat_info"))
+async def cmd_get_chat_info(message: types.Message):
+    """Получает детальную информацию о чате по его ID"""
+    await message.answer("🔄 Получаю информацию о чате...")
+    try:
+        # Получаем информацию по chat_id
+        chat_id = MAX_CHANNEL_ID.strip()
+        logger.info(f"🔍 Запрос информации для chat_id: {chat_id}")
+        
+        # Пробуем получить информацию по ID
+        chat_info = await max_bot.get_chat_info(chat_id)
+        await message.answer(f"✅ **Информация по chat_id:**\n```json\n{chat_info}\n```")
+        
+        # Если это invite-код, пробуем и его
+        if len(chat_id) > 20 and '/' not in chat_id:
+            logger.info(f"🔍 Пробуем как invite-код: {chat_id}")
+            invite_info = await max_bot.get_chat_by_invite(chat_id)
+            await message.answer(f"✅ **Информация по invite-коду:**\n```json\n{invite_info}\n```")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка получения информации о чате: {e}")
 
 @dp.message()
 async def forward_to_max(message: types.Message):
@@ -281,7 +316,8 @@ async def cmd_start(message: types.Message):
         "✅ Бот-пересыльщик запущен\n\n"
         "📋 **Доступные команды:**\n"
         "/start - информация о боте\n"
-        "/get_my_chats - список доступных чатов в MAX\n\n"
+        "/get_my_chats - список доступных чатов в MAX\n"
+        "/get_chat_info - информация о текущем канале\n\n"
         f"📤 Откуда: группа {TELEGRAM_GROUP_ID}\n"
         f"📥 Куда: канал {MAX_CHANNEL_ID}"
     )
