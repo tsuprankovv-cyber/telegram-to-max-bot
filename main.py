@@ -12,11 +12,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === КЛАСС ДЛЯ РАБОТЫ С MAX API (ИСПРАВЛЕННЫЙ) ===
+# === КЛАСС ДЛЯ РАБОТЫ С MAX API ===
 class MaxBot:
     def __init__(self, token: str):
         self.token = token
-        # ПРАВИЛЬНЫЙ URL ИЗ ДОКУМЕНТАЦИИ MAX
         self.base_url = "https://platform-api.max.ru"
         self.session = None
         logger.info("✅ MaxBot инициализирован с правильным URL")
@@ -25,29 +24,39 @@ class MaxBot:
         if not self.session:
             self.session = aiohttp.ClientSession()
             
-    async def _request(self, endpoint: str, data: dict):
+    async def _request(self, endpoint: str, data: dict = None, method: str = "POST"):
         await self._ensure_session()
         url = f"{self.base_url}/{endpoint}"
         headers = {
-            "Authorization": f"{self.token}",  # Токен без "Bearer"
+            "Authorization": f"{self.token}",
             "Content-Type": "application/json"
         }
         
         logger.info(f"📤 Отправка запроса в MAX: {endpoint}")
         logger.info(f"   URL: {url}")
-        logger.info(f"   Данные: {str(data)[:200]}...")
+        if data:
+            logger.info(f"   Данные: {str(data)[:200]}...")
         
         try:
-            async with self.session.post(url, headers=headers, json=data) as resp:
-                response = await resp.json()
-                logger.info(f"📥 Ответ от MAX (статус {resp.status}): {response}")
-                return response
+            if method == "GET":
+                async with self.session.get(url, headers=headers) as resp:
+                    response = await resp.json()
+                    logger.info(f"📥 Ответ от MAX (статус {resp.status}): {response}")
+                    return response
+            else:
+                async with self.session.post(url, headers=headers, json=data) as resp:
+                    response = await resp.json()
+                    logger.info(f"📥 Ответ от MAX (статус {resp.status}): {response}")
+                    return response
         except Exception as e:
             logger.error(f"❌ Ошибка соединения с MAX: {e}")
             raise
     
+    async def get_chats(self):
+        """Получение списка доступных чатов"""
+        return await self._request("chats", method="GET")
+    
     async def send_message(self, chat_id: str, text: str, reply_markup=None):
-        """Отправка текстового сообщения"""
         data = {
             "chat_id": chat_id,
             "text": text,
@@ -58,7 +67,6 @@ class MaxBot:
         return await self._request("messages", data)
     
     async def send_photo(self, chat_id: str, photo: str, caption=None, reply_markup=None):
-        """Отправка фото"""
         data = {
             "chat_id": chat_id,
             "photo": photo,
@@ -71,7 +79,6 @@ class MaxBot:
         return await self._request("messages", data)
     
     async def send_video(self, chat_id: str, video: str, caption=None, reply_markup=None):
-        """Отправка видео"""
         data = {
             "chat_id": chat_id,
             "video": video,
@@ -84,7 +91,6 @@ class MaxBot:
         return await self._request("messages", data)
     
     async def send_voice(self, chat_id: str, voice: str, caption=None, reply_markup=None):
-        """Отправка голосового сообщения"""
         data = {
             "chat_id": chat_id,
             "voice": voice,
@@ -97,7 +103,6 @@ class MaxBot:
         return await self._request("messages", data)
     
     async def send_document(self, chat_id: str, document: str, caption=None, reply_markup=None):
-        """Отправка документа"""
         data = {
             "chat_id": chat_id,
             "document": document,
@@ -152,6 +157,40 @@ def extract_buttons(message: types.Message):
             if button_row:
                 buttons.append(button_row)
     return buttons
+
+# === КОМАНДА ДЛЯ ПОЛУЧЕНИЯ СПИСКА ЧАТОВ ===
+@dp.message(Command("get_my_chats"))
+async def cmd_get_my_chats(message: types.Message):
+    """Получение списка всех чатов, доступных боту"""
+    await message.answer("🔄 Запрашиваю список доступных чатов...")
+    try:
+        chats = await max_bot.get_chats()
+        logger.info(f"📥 Получен список чатов: {chats}")
+        
+        # Форматируем вывод
+        if isinstance(chats, dict) and chats.get('chats'):
+            result = "✅ **Доступные чаты:**\n\n"
+            for chat in chats['chats']:
+                result += f"📌 **Название:** {chat.get('title', 'Без названия')}\n"
+                result += f"🆔 **ID:** `{chat.get('id')}`\n"
+                result += f"📊 **Тип:** {chat.get('type', 'канал')}\n"
+                result += f"🔗 **Ссылка:** {chat.get('link', 'нет')}\n"
+                result += "-" * 30 + "\n"
+        elif isinstance(chats, list):
+            result = "✅ **Доступные чаты:**\n\n"
+            for chat in chats:
+                result += f"📌 **Название:** {chat.get('title', 'Без названия')}\n"
+                result += f"🆔 **ID:** `{chat.get('id') or chat.get('chat_id')}`\n"
+                result += f"📊 **Тип:** {chat.get('type', 'канал')}\n"
+                result += "-" * 30 + "\n"
+        else:
+            result = f"❌ Ответ от API: {chats}"
+        
+        await message.answer(result)
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Ошибка получения чатов: {e}")
 
 @dp.message()
 async def forward_to_max(message: types.Message):
@@ -239,24 +278,13 @@ async def forward_to_max(message: types.Message):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "✅ Бот-пересыльщик запущен\n"
+        "✅ Бот-пересыльщик запущен\n\n"
+        "📋 **Доступные команды:**\n"
+        "/start - информация о боте\n"
+        "/get_my_chats - список доступных чатов в MAX\n\n"
         f"📤 Откуда: группа {TELEGRAM_GROUP_ID}\n"
-        f"📥 Куда: канал {MAX_CHANNEL_ID}\n"
-        f"🌐 MAX API: https://platform-api.max.ru"
+        f"📥 Куда: канал {MAX_CHANNEL_ID}"
     )
-
-@dp.message(Command("test"))
-async def cmd_test(message: types.Message):
-    """Команда для тестирования подключения к MAX"""
-    await message.answer("🔄 Тестирую подключение к MAX API...")
-    try:
-        result = await max_bot.send_message(
-            MAX_CHANNEL_ID,
-            "🔄 Тестовое сообщение от бота"
-        )
-        await message.answer(f"✅ Подключение работает! Ответ: {result}")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
     logger.info("="*60)
