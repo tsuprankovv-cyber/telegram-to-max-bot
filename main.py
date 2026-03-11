@@ -55,43 +55,37 @@ def convert_entities_to_markdown(text: str, entities: list) -> str:
         
         # Конвертируем в Markdown для MAX
         if entity.type == "bold":
-            # Markdown: **жирный**
             replacement = f"**{entity_text}**"
             logger.debug(f"   • Жирный: '{entity_text}' -> **{entity_text}**")
             
         elif entity.type == "italic":
-            # Markdown: *курсив*
             replacement = f"*{entity_text}*"
             logger.debug(f"   • Курсив: '{entity_text}' -> *{entity_text}*")
             
         elif entity.type == "underline":
-            # В Markdown нет подчеркивания, используем *курсив* как аналог
-            replacement = f"*{entity_text}*"
-            logger.debug(f"   • Подчеркнутый (как курсив): '{entity_text}' -> *{entity_text}*")
+            # В Markdown MAX поддерживается ++подчеркнутый++
+            replacement = f"++{entity_text}++"
+            logger.debug(f"   • Подчеркнутый: '{entity_text}' -> ++{entity_text}++")
             
         elif entity.type == "strikethrough":
-            # Markdown: ~~зачеркнутый~~
             replacement = f"~~{entity_text}~~"
             logger.debug(f"   • Зачеркнутый: '{entity_text}' -> ~~{entity_text}~~")
             
         elif entity.type == "code":
-            # Markdown: `код`
             replacement = f"`{entity_text}`"
             logger.debug(f"   • Моноширинный: '{entity_text}' -> `{entity_text}`")
             
         elif entity.type == "pre":
-            # Markdown: ```код```
             replacement = f"```\n{entity_text}\n```"
             logger.debug(f"   • Блок кода: '{entity_text}' -> ```...```")
             
         elif entity.type == "text_link":
-            # Markdown: [текст](url)
             url = entity.url
             replacement = f"[{entity_text}]({url})"
             logger.debug(f"   • Ссылка: '{entity_text}' -> [{entity_text}]({url})")
             
         elif entity.type == "blockquote":
-            # В Markdown нет цитат, используем > 
+            # В Markdown MAX поддерживается > для цитат
             replacement = f"> {entity_text}"
             logger.debug(f"   • Цитата: '{entity_text}' -> > {entity_text}")
             
@@ -114,10 +108,10 @@ async def send_to_max_channel(text: str):
         "Content-Type": "application/json"
     }
     
-    # Используем Markdown форматирование [citation:3][citation:4]
+    # КЛЮЧЕВОЙ МОМЕНТ: используем format="markdown" для форматирования
     message_data = {
         "text": text,
-        "format": "markdown"  # КЛЮЧЕВОЙ ПАРАМЕТР!
+        "format": "markdown"  # Этого параметра не было в ваших логах!
     }
     
     logger.info("="*70)
@@ -190,9 +184,11 @@ async def cmd_start(message: types.Message):
         "📋 **Поддерживаемое форматирование:**\n"
         "• Жирный (**текст**)\n"
         "• Курсив (*текст*)\n"
+        "• Подчеркнутый (++текст++)\n"
         "• Зачеркнутый (~~текст~~)\n"
         "• Моноширинный (`текст`)\n"
-        "• Ссылки ([текст](url))\n\n"
+        "• Ссылки ([текст](url))\n"
+        "• Цитаты (> текст)\n\n"
         "Просто отправьте сообщение с форматированием в группу!"
     )
 
@@ -202,10 +198,12 @@ async def cmd_test(message: types.Message):
     test_text = (
         "**жирный текст**\n"
         "*курсив*\n"
+        "++подчеркнутый++\n"
         "~~зачеркнутый~~\n"
         "`моноширинный`\n"
         "[ссылка на example](https://example.com)\n"
         "👋 эмодзи\n"
+        "> цитата\n"
         "**жирный** и *курсив* вместе"
     )
     await message.answer("🔄 Отправляю тестовое сообщение с форматированием...")
