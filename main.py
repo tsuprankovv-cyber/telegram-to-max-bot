@@ -165,21 +165,31 @@ def process_message_text(text: str, entities: list) -> str:
     heading_text, remaining_text, remaining_entities = extract_heading(text, entities)
     
     if heading_text:
-        # Формируем Markdown с заголовком
+        # Находим entities которые относятся к заголовку
+        heading_len = len(heading_text)
+        heading_entities = []
+        other_entities = []
+        
+        for entity in entities:
+            if entity.offset < heading_len:
+                # Это entity из заголовка - копируем как есть
+                heading_entities.append(entity)
+            else:
+                # Это entity из остального текста - смещаем позицию
+                new_entity = type('Entity', (), {})()
+                new_entity.offset = entity.offset - heading_len
+                new_entity.length = entity.length
+                new_entity.type = entity.type
+                if hasattr(entity, 'url'):
+                    new_entity.url = entity.url
+                other_entities.append(new_entity)
+        
+        # Формируем Markdown для заголовка (просто # + текст, без доп форматирования)
         heading_markdown = f"# {heading_text}"
         
         # Обрабатываем оставшийся текст с entities
         if remaining_text:
-            # Корректируем позиции для оставшихся entities
-            # Вычитаем длину заголовка, так как мы его удалили из начала
-            heading_len = len(heading_text)
-            for entity in remaining_entities:
-                entity.offset -= heading_len
-            
-            # Конвертируем оставшийся текст
-            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_entities)
-            
-            # Собираем результат
+            remaining_markdown = convert_entities_to_markdown(remaining_text, other_entities)
             result = f"{heading_markdown}\n\n{remaining_markdown}"
         else:
             result = heading_markdown
