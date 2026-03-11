@@ -3,10 +3,13 @@ import asyncio
 import logging
 import aiohttp
 import json
+import html
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.utils.markdown import hbold, hitalic, hlink, hcode, hpre, hunderline, hstrikethrough
+from datetime import datetime
 
-# === НАСТРОЙКА МАКСИМАЛЬНО ПОДРОБНОГО ЛОГИРОВАНИЯ ===
+# === НАСТРОЙКА МАКСИМАЛЬНОГО ЛОГИРОВАНИЯ ===
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -19,182 +22,218 @@ TELEGRAM_GROUP_ID = int(os.getenv('TELEGRAM_GROUP_ID'))
 MAX_TOKEN = os.getenv('MAX_TOKEN')
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
 
-# Проверка наличия всех переменных
-if not all([TELEGRAM_TOKEN, TELEGRAM_GROUP_ID, MAX_TOKEN, MAX_CHANNEL_ID]):
-    logger.error("❌ Не все переменные окружения установлены!")
-    raise ValueError("Missing environment variables")
-
-logger.info("="*70)
+logger.info("="*80)
 logger.info("📋 ТЕКУЩИЕ НАСТРОЙКИ:")
 logger.info(f"🤖 TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:10]}...{TELEGRAM_TOKEN[-5:]}")
-logger.info(f"👥 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID} (тип: {type(TELEGRAM_GROUP_ID)})")
+logger.info(f"👥 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
 logger.info(f"🔑 MAX_TOKEN: {MAX_TOKEN[:10]}...{MAX_TOKEN[-5:]}")
-logger.info(f"📢 MAX_CHANNEL_ID: '{MAX_CHANNEL_ID}' (тип: {type(MAX_CHANNEL_ID)})")
-logger.info("="*70)
+logger.info(f"📢 MAX_CHANNEL_ID: '{MAX_CHANNEL_ID}'")
+logger.info("="*80)
 
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-async def send_test_to_max(text: str):
+def extract_text_with_entities(message: types.Message) -> str:
     """
-    ПРОСТЕЙШАЯ функция отправки только текста в MAX
-    С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ каждого шага
+    Извлекает текст с полным форматированием (жирный, курсив, ссылки и т.д.)
+    Конвертирует Telegram entities в HTML для MAX
     """
+    if not message.text and not message.caption:
+        return ""
     
-    # 1. Формируем URL с chat_id как query-параметр (СОГЛАСНО ДОКУМЕНТАЦИИ)
-    chat_id_str = str(MAX_CHANNEL_ID).strip()
-    url = f"https://platform-api.max.ru/messages?chat_id={chat_id_str}"
+    text = message.text or message.caption or ""
+    entities = message.entities or message.caption_entities or []
     
-    # 2. Формируем заголовки
+    if not entities:
+        logger.debug("📝 Нет форматирования, обычный текст")
+        return text
+    
+    # Сортируем entities по позиции (от конца к началу, чтобы не сбивать индексы)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    
+    html_text = text
+    logger.info(f"🔍 Найдено {len(entities)} entities для форматирования")
+    
+    for entity in sorted_entities:
+        start = entity.offset
+        end = start + entity.length
+        entity_text = text[start:end]
+        
+        # Экранируем HTML специальные символы
+        entity_text = html.escape(entity_text)
+        
+        # Применяем форматирование в зависимости от типа entity
+        if entity.type == "bold":
+            logger.debug(f"   • Жирный текст: '{entity_text}'")
+            replacement = f"<b>{entity_text}</b>"
+        elif entity.type == "italic":
+            logger.debug(f"   • Курсив: '{entity_text}'")
+            replacement = f"<i>{entity_text}</i>"
+        elif entity.type == "underline":
+            logger.debug(f"   • Подчеркнутый: '{entity_text}'")
+            replacement = f"<u>{entity_text}</u>"
+        elif entity.type == "strikethrough":
+            logger.debug(f"   • Зачеркнутый: '{entity_text}'")
+            replacement = f"<s>{entity_text}</s>"
+        elif entity.type == "code":
+            logger.debug(f"   • Моноширинный: '{entity_text}'")
+            replacement = f"<code>{entity_text}</code>"
+        elif entity.type == "pre":
+            logger.debug(f"   • Блок кода: '{entity_text}'")
+            replacement = f"<pre>{entity_text}</pre>"
+        elif entity.type == "text_link":
+            url = entity.url
+            logger.debug(f"   • Ссылка: '{entity_text}' -> {url}")
+            replacement = f'<a href="{url}">{entity_text}</a>'
+        elif entity.type == "text_mention":
+            user = entity.user
+            logger.debug(f"   • Упоминание: {entity_text} (ID: {user.id})")
+            replacement = f'<a href="tg://user?id={user.id}">{entity_text}</a>'
+        elif entity.type == "spoiler":
+            logger.debug(f"   • Спойлер: '{entity_text}'")
+            # MAX может не поддерживать спойлеры, используем жирный как fallback
+            replacement = f"<b>[spoiler]</b>{entity_text}<b>[/spoiler]</b>"
+        else:
+            logger.warning(f"⚠️ Неизвестный тип entity: {entity.type}")
+            continue
+        
+        # Заменяем текст с учетом уже сделанных замен
+        html_text = html_text[:start] + replacement + html_text[end:]
+    
+    logger.info(f"📝 Итоговый HTML: {html_text[:200]}...")
+    return html_text
+
+async def send_to_max_with_logging(text: str, test_name: str = ""):
+    """Отправка текста с максимальным логированием"""
+    
+    url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
         "Authorization": MAX_TOKEN,
-        "Content-Type": "application/json",
-        "User-Agent": "Telegram-Test-Bot/1.0"
+        "Content-Type": "application/json"
     }
     
-    # 3. Формируем ТОЛЬКО сообщение (без recipient)
-    message_data = {"text": text}
+    # Формируем данные для отправки
+    message_data = {
+        "text": text,
+        "parse_mode": "HTML"  # Включаем HTML-разметку
+    }
     
-    # 4. ЛОГИРУЕМ ВСЁ ДО МЕЛЬЧАЙШИХ ДЕТАЛЕЙ
-    logger.info("="*70)
-    logger.info("📤 ПОДГОТОВКА ЗАПРОСА К MAX API")
-    logger.info(f"📍 ПОЛНЫЙ URL: {url}")
+    logger.info("="*80)
+    logger.info(f"🔬 ТЕСТ: {test_name}")
+    logger.info(f"📍 URL: {url}")
     logger.info(f"🔑 TOKEN: {MAX_TOKEN[:10]}...{MAX_TOKEN[-5:]}")
-    logger.info(f"📋 HEADERS: { {k: v[:20]+'...' if k == 'Authorization' else v for k, v in headers.items()} }")
-    logger.info(f"📦 CHAT_ID (str): '{chat_id_str}'")
-    logger.info(f"📦 CHAT_ID (type): {type(chat_id_str)}")
-    logger.info(f"📝 TEXT: '{text}'")
-    logger.info(f"📝 TEXT length: {len(text)}")
-    logger.info(f"📦 FULL JSON BODY: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
-    logger.info("="*70)
+    logger.info(f"📋 HEADERS: {{'Authorization': '{MAX_TOKEN[:10]}...'}}")
+    logger.info(f"📦 CHAT_ID: {MAX_CHANNEL_ID}")
+    logger.info(f"📝 TEXT (raw): {text}")
+    logger.info(f"📏 TEXT length: {len(text)}")
+    logger.info(f"📦 FULL JSON: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
+    logger.info("="*80)
     
-    # 5. Отправляем запрос
     try:
         async with aiohttp.ClientSession() as session:
-            logger.info("🔄 СОЗДАНИЕ СЕССИИ...")
-            
             start_time = asyncio.get_event_loop().time()
             
-            logger.info(f"🚀 ОТПРАВКА POST запроса на {url}")
             async with session.post(url, headers=headers, json=message_data) as resp:
-                
                 response_time = (asyncio.get_event_loop().time() - start_time) * 1000
-                
-                # 6. ЧИТАЕМ ОТВЕТ
                 response_text = await resp.text()
                 
-                logger.info("="*70)
-                logger.info("📥 ПОЛУЧЕН ОТВЕТ ОТ MAX API")
+                logger.info("="*80)
+                logger.info(f"📥 ОТВЕТ MAX API")
                 logger.info(f"📊 HTTP STATUS: {resp.status}")
-                logger.info(f"⏱ ВРЕМЯ ОТВЕТА: {response_time:.0f}ms")
-                logger.info(f"📋 RESPONSE HEADERS: {dict(resp.headers)}")
-                logger.info(f"📦 RESPONSE BODY: {response_text}")
+                logger.info(f"⏱ ВРЕМЯ: {response_time:.0f}ms")
+                logger.info(f"📋 HEADERS: {dict(resp.headers)}")
+                logger.info(f"📦 BODY: {response_text}")
+                logger.info("="*80)
                 
-                # 7. АНАЛИЗИРУЕМ ОТВЕТ
                 if resp.status == 200:
-                    logger.info("✅ УСПЕХ! Сообщение отправлено")
-                    try:
-                        response_json = json.loads(response_text)
-                        logger.info(f"📊 ПАРСИНГ JSON: {json.dumps(response_json, indent=2, ensure_ascii=False)}")
-                    except:
-                        pass
-                    return True
+                    logger.info(f"✅ ТЕСТ ПРОЙДЕН: {test_name}")
+                    return True, response_text
                 else:
-                    logger.error("❌ ОШИБКА!")
+                    logger.error(f"❌ ТЕСТ НЕ ПРОЙДЕН: {test_name}")
+                    return False, response_text
                     
-                    # ДЕТАЛЬНЫЙ АНАЛИЗ ОШИБКИ 400
-                    if resp.status == 400:
-                        logger.error("🔍 АНАЛИЗ ОШИБКИ 400:")
-                        
-                        if 'proto.payload' in response_text:
-                            logger.error("   • КОД: proto.payload")
-                            logger.error("   • СООБЩЕНИЕ: Unknown recipient")
-                            logger.error("   • ПРИЧИНЫ:")
-                            logger.error("     1️⃣ chat_id не существует или недоступен боту")
-                            logger.error("     2️⃣ Неправильный формат chat_id")
-                            logger.error("     3️⃣ Бот не имеет прав на отправку")
-                            
-                            # Проверяем chat_id
-                            logger.error(f"   • ИСПОЛЬЗУЕМЫЙ chat_id: '{chat_id_str}'")
-                            
-                            # Пробуем альтернативный формат (без кавычек в логе)
-                            try:
-                                chat_id_int = int(chat_id_str)
-                                logger.error(f"   • АЛЬТЕРНАТИВНЫЙ ФОРМАТ (int): {chat_id_int}")
-                            except:
-                                pass
-                    
-                    return False
-                    
-    except aiohttp.ClientConnectorError as e:
-        logger.error(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ: {e}")
-        return False
     except Exception as e:
-        logger.error(f"❌ НЕИЗВЕСТНАЯ ОШИБКА: {e}")
-        logger.exception("ДЕТАЛЬНЫЙ СТЕК:")
-        return False
+        logger.error(f"❌ ОШИБКА: {e}")
+        logger.exception("ДЕТАЛИ:")
+        return False, str(e)
 
 @dp.message()
 async def forward_to_max(message: types.Message):
-    """Максимально простой тест - только цифры"""
+    """Обработчик сообщений с полным форматированием"""
     
-    # Проверяем, что сообщение из нужной группы
     if message.chat.id != TELEGRAM_GROUP_ID:
-        logger.debug(f"Сообщение из другого чата: {message.chat.id}")
         return
     
-    # Логируем полученное сообщение
-    logger.info("="*70)
+    logger.info("="*80)
     logger.info(f"📨 ПОЛУЧЕНО СООБЩЕНИЕ ID: {message.message_id}")
     logger.info(f"👤 От: {message.from_user.full_name}")
-    logger.info(f"💬 Чат: {message.chat.id}")
+    logger.info(f"🤖 Это бот: {message.from_user.is_bot}")
     
-    # Берем текст сообщения
-    text = message.text or message.caption or ""
-    logger.info(f"📝 Текст: '{text}'")
+    # Извлекаем текст с форматированием
+    formatted_text = extract_text_with_entities(message)
     
-    # Отправляем только текст в MAX
-    logger.info(f"🚀 Отправляем в MAX...")
-    success = await send_test_to_max(text)
+    # Добавляем подпись для пересланных сообщений
+    if message.forward_date and message.forward_from_chat:
+        source = message.forward_from_chat.title
+        formatted_text = f"📢 Переслано из {source}:\n\n{formatted_text}"
+        logger.info(f"🔄 Добавлена подпись об источнике: {source}")
+    
+    # Отправляем в MAX
+    test_name = f"Текст от {message.from_user.full_name}"
+    success, response = await send_to_max_with_logging(formatted_text, test_name)
     
     if success:
-        logger.info(f"✅ Успешно переслано: '{text}'")
+        logger.info("✅ СООБЩЕНИЕ УСПЕШНО ПЕРЕСЛАНО")
     else:
-        logger.error(f"❌ Не удалось переслать: '{text}'")
+        logger.error("❌ НЕ УДАЛОСЬ ПЕРЕСЛАТЬ")
     
-    logger.info("="*70)
+    logger.info("="*80)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "✅ **ТЕСТОВЫЙ БОТ-ПЕРЕСЫЛЬЩИК**\n\n"
+        "✅ **БОТ-ПЕРЕСЫЛЬЩИК (ЭТАП 1)**\n\n"
+        "📋 **ТЕСТИРУЕМЫЕ ФОРМАТЫ:**\n"
+        "• Жирный текст\n"
+        "• Курсив\n"
+        "• Подчеркнутый\n"
+        "• Зачеркнутый\n"
+        "• Моноширинный\n"
+        "• Ссылки в тексте\n"
+        "• Цитаты\n"
+        "• Эмодзи\n"
+        "• Комбинации\n\n"
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
         f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
-        "📋 **Режим:** ТОЛЬКО ТЕКСТ, максимальное логирование\n\n"
-        "Отправьте любое сообщение с цифрой в группу"
+        "🔍 **Логирование включено** — проверяйте логи после каждого теста"
     )
 
-@dp.message(Command("test"))
-async def cmd_test(message: types.Message):
-    """Ручная тестовая отправка"""
-    test_text = f"🔍 ТЕСТ {datetime.now().strftime('%H:%M:%S')}"
-    await message.answer(f"🔄 Отправляю тест: '{test_text}'")
-    success = await send_test_to_max(test_text)
-    if success:
-        await message.answer("✅ ТЕСТ ПРОЙДЕН!")
-    else:
-        await message.answer("❌ ТЕСТ НЕ ПРОЙДЕН. Проверьте логи.")
-
-# Добавляем datetime для команды /test
-from datetime import datetime
+@dp.message(Command("test1"))
+async def cmd_test1(message: types.Message):
+    """Отправляет тестовый набор для проверки"""
+    test_text = (
+        "<b>Жирный текст</b>\n"
+        "<i>Курсив</i>\n"
+        "<u>Подчеркнутый</u>\n"
+        "<s>Зачеркнутый</s>\n"
+        "<code>Моноширинный</code>\n"
+        '<a href="https://example.com">Ссылка</a>\n'
+        "Эмодзи: 👋 🌍 🎉\n"
+        "> Цитата\n"
+        "<b><i>Жирный + Курсив</i></b>\n"
+        "Обычный текст со <b>вставкой</b> форматирования"
+    )
+    
+    await message.answer("🔄 Отправляю тестовый набор в группу...")
+    await message.answer(test_text, parse_mode="HTML")
 
 async def main():
-    logger.info("="*70)
-    logger.info("🚀 ЗАПУСК ТЕСТОВОГО БОТА-ПЕРЕСЫЛЬЩИКА")
+    logger.info("="*80)
+    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (ЭТАП 1)")
     logger.info(f"📤 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
-    logger.info(f"📥 MAX_CHANNEL_ID: '{MAX_CHANNEL_ID}'")
-    logger.info("📋 РЕЖИМ: ТОЛЬКО ТЕКСТ, МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ")
-    logger.info("="*70)
+    logger.info(f"📥 MAX_CHANNEL_ID: {MAX_CHANNEL_ID}")
+    logger.info("📋 РЕЖИМ: ПРОВЕРКА ФОРМАТИРОВАНИЯ")
+    logger.info("="*80)
     
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
