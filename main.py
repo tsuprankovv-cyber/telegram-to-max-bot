@@ -101,56 +101,56 @@ def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
     
     return heading_text, remaining_text, remaining_entities
 
-def apply_formatting(text: str, entities: list, offset_shift: int = 0) -> str:
+def convert_entities_to_markdown(text: str, entities: list) -> str:
     """
-    Применяет форматирование к тексту на основе entities
+    Конвертирует Telegram entities в Markdown для MAX
     """
     if not entities:
         return text
     
-    # Корректируем позиции с учетом смещения
-    adjusted_entities = []
-    for entity in entities:
-        entity.offset += offset_shift
-        adjusted_entities.append(entity)
-    
     # Сортируем от конца к началу
-    sorted_entities = sorted(adjusted_entities, key=lambda e: e.offset, reverse=True)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
     result = text
-    logger.debug(f"🔍 Применение форматирования к {len(entities)} entities")
+    logger.debug(f"🔍 Конвертация {len(entities)} entities в Markdown")
     
     for entity in sorted_entities:
         start = entity.offset
         end = start + entity.length
         entity_text = text[start:end]
         
-        # Определяем префикс и суффикс для каждого типа
+        # Конвертируем в Markdown для MAX
         if entity.type == "bold":
-            prefix, suffix = "**", "**"
+            replacement = f"**{entity_text}**"
+            logger.debug(f"   • Жирный: '{entity_text}'")
+            
         elif entity.type == "italic":
-            prefix, suffix = "*", "*"
+            replacement = f"*{entity_text}*"
+            logger.debug(f"   • Курсив: '{entity_text}'")
+            
         elif entity.type == "underline":
-            prefix, suffix = "++", "++"
+            replacement = f"++{entity_text}++"
+            logger.debug(f"   • Подчеркнутый: '{entity_text}'")
+            
         elif entity.type == "strikethrough":
-            prefix, suffix = "~~", "~~"
+            replacement = f"~~{entity_text}~~"
+            logger.debug(f"   • Зачеркнутый: '{entity_text}'")
+            
         elif entity.type == "text_link":
-            # Для ссылок особый случай
-            replacement = f"[{entity_text}]({entity.url})"
-            result = result[:start] + replacement + result[end:]
-            continue
+            url = entity.url
+            replacement = f"[{entity_text}]({url})"
+            logger.debug(f"   • Ссылка: '{entity_text}'")
+            
         elif entity.type == "blockquote":
-            # Для цитат особый случай
             replacement = f"> {entity_text}"
-            result = result[:start] + replacement + result[end:]
-            continue
+            logger.debug(f"   • Цитата: '{entity_text}'")
+            
         else:
+            logger.debug(f"   • Пропускаем {entity.type}")
             continue
         
-        # Применяем форматирование
-        replacement = f"{prefix}{entity_text}{suffix}"
+        # Заменяем в тексте
         result = result[:start] + replacement + result[end:]
-        logger.debug(f"   • {entity.type}: '{entity_text}'")
     
     return result
 
@@ -165,21 +165,21 @@ def process_message_text(text: str, entities: list) -> str:
     heading_text, remaining_text, remaining_entities = extract_heading(text, entities)
     
     if heading_text:
-        # Формируем заголовок, сохраняя все его форматирования
-        # Находим все entities, которые относятся к заголовку
-        heading_entities = [e for e in entities if e.offset < len(heading_text)]
+        # Формируем Markdown с заголовком
+        heading_markdown = f"# {heading_text}"
         
-        # Применяем форматирование к заголовку
-        formatted_heading = apply_formatting(heading_text, heading_entities, 0)
-        
-        # Добавляем символ заголовка
-        heading_markdown = f"# {formatted_heading}"
-        
-        # Обрабатываем оставшийся текст
+        # Обрабатываем оставшийся текст с entities
         if remaining_text:
             # Корректируем позиции для оставшихся entities
+            # Вычитаем длину заголовка, так как мы его удалили из начала
             heading_len = len(heading_text)
-            remaining_markdown = apply_formatting(remaining_text, remaining_entities, -heading_len)
+            for entity in remaining_entities:
+                entity.offset -= heading_len
+            
+            # Конвертируем оставшийся текст
+            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_entities)
+            
+            # Собираем результат
             result = f"{heading_markdown}\n\n{remaining_markdown}"
         else:
             result = heading_markdown
@@ -188,7 +188,7 @@ def process_message_text(text: str, entities: list) -> str:
         return result
     else:
         # Обычное форматирование без заголовка
-        result = apply_formatting(text, entities, 0)
+        result = convert_entities_to_markdown(text, entities)
         logger.info(f"📝 Обычное форматирование")
         return result
 
@@ -276,22 +276,21 @@ async def cmd_start(message: types.Message):
         "• ~~Зачеркнутый~~ → ~~зачеркнутый~~\n"
         "• [Ссылки](url) → [ссылки](url)\n"
         "• > Цитаты → > цитаты\n"
-        "• # Заголовки (жирный текст в начале, с сохранением всех форматов)\n"
+        "• # Заголовки (жирный текст в начале)\n"
         "• Эмодзи 👋\n\n"
         "Просто отправьте сообщение в группу!"
     )
 
 @dp.message(Command("test"))
 async def cmd_test(message: types.Message):
-    """Тестовая отправка с примерами сложных заголовков"""
+    """Тестовая отправка"""
     test_text = (
-        "**_жирный курсив_** обычный текст после\n\n"
-        "**++жирный подчёркнутый++** и ещё текст\n\n"
-        "***жирный курсив*** и дальше\n\n"
-        "**обычный жирный** текст\n\n"
-        "*просто курсив* не заголовок\n\n"
-        "++просто подчёркнутый++ не заголовок\n\n"
-        "[ссылка](https://example.com) в тексте\n\n"
+        "**Важное объявление**\n\n"
+        "Это обычный текст после заголовка.\n\n"
+        "**Просто жирный** в середине текста\n\n"
+        "*Курсив* и **жирный** вместе\n\n"
+        "++подчеркнутый++ и ~~зачеркнутый~~\n\n"
+        "[ссылка](https://example.com)\n\n"
         "> цитата\n\n"
         "👋 эмодзи"
     )
