@@ -101,22 +101,15 @@ def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
     
     return heading_text, remaining_text, remaining_entities
 
-def convert_entities_to_markdown(text: str, entities: list, offset_shift: int = 0) -> str:
+def convert_entities_to_markdown(text: str, entities: list) -> str:
     """
-    Конвертирует Telegram entities в Markdown для MAX с учетом смещения
+    Конвертирует Telegram entities в Markdown для MAX
     """
     if not entities:
         return text
     
-    # Корректируем позиции entities с учетом смещения
-    adjusted_entities = []
-    for entity in entities:
-        if hasattr(entity, 'offset'):
-            entity.offset += offset_shift
-            adjusted_entities.append(entity)
-    
     # Сортируем от конца к началу
-    sorted_entities = sorted(adjusted_entities, key=lambda e: e.offset, reverse=True)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
     result = text
     logger.debug(f"🔍 Конвертация {len(entities)} entities в Markdown")
@@ -173,14 +166,20 @@ def process_message_text(text: str, entities: list) -> str:
     
     if heading_text:
         # Формируем Markdown с заголовком
-        # Заголовок без жирного форматирования (просто текст после #)
         heading_markdown = f"# {heading_text}"
         
         # Обрабатываем оставшийся текст с entities
         if remaining_text:
-            # Вычисляем смещение для entities (длина заголовка + символы # и \n\n)
-            shift = len(heading_text) + 2 + 2  # # + пробел + \n\n
-            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_entities, -shift)
+            # Корректируем позиции для оставшихся entities
+            # Вычитаем длину заголовка, так как мы его удалили из начала
+            heading_len = len(heading_text)
+            for entity in remaining_entities:
+                entity.offset -= heading_len
+            
+            # Конвертируем оставшийся текст
+            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_entities)
+            
+            # Собираем результат
             result = f"{heading_markdown}\n\n{remaining_markdown}"
         else:
             result = heading_markdown
@@ -189,7 +188,7 @@ def process_message_text(text: str, entities: list) -> str:
         return result
     else:
         # Обычное форматирование без заголовка
-        result = convert_entities_to_markdown(text, entities, 0)
+        result = convert_entities_to_markdown(text, entities)
         logger.info(f"📝 Обычное форматирование")
         return result
 
