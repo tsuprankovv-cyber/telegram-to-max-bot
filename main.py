@@ -3,10 +3,9 @@ import asyncio
 import logging
 import aiohttp
 import json
-import html
+import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.utils.markdown import hbold, hitalic, hlink, hcode, hpre, hunderline, hstrikethrough
 from datetime import datetime
 
 # === НАСТРОЙКА МАКСИМАЛЬНОГО ЛОГИРОВАНИЯ ===
@@ -33,75 +32,93 @@ logger.info("="*80)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def extract_text_with_entities(message: types.Message) -> str:
+def convert_telegram_to_max_format(text: str, entities: list) -> str:
     """
-    Извлекает текст с полным форматированием (жирный, курсив, ссылки и т.д.)
-    Конвертирует Telegram entities в HTML для MAX
+    Конвертирует Telegram entities в формат MAX
+    MAX использует свой собственный формат разметки
     """
-    if not message.text and not message.caption:
-        return ""
-    
-    text = message.text or message.caption or ""
-    entities = message.entities or message.caption_entities or []
-    
     if not entities:
-        logger.debug("📝 Нет форматирования, обычный текст")
         return text
     
-    # Сортируем entities по позиции (от конца к началу, чтобы не сбивать индексы)
+    # Сортируем entities от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
-    html_text = text
-    logger.info(f"🔍 Найдено {len(entities)} entities для форматирования")
+    result = text
+    logger.info(f"🔍 Конвертация {len(entities)} entities в формат MAX")
     
     for entity in sorted_entities:
         start = entity.offset
         end = start + entity.length
         entity_text = text[start:end]
         
-        # Экранируем HTML специальные символы
-        entity_text = html.escape(entity_text)
-        
-        # Применяем форматирование в зависимости от типа entity
+        # Конвертируем в формат MAX
         if entity.type == "bold":
-            logger.debug(f"   • Жирный текст: '{entity_text}'")
-            replacement = f"<b>{entity_text}</b>"
+            # MAX использует **жирный**
+            replacement = f"**{entity_text}**"
+            logger.debug(f"   • Жирный: {entity_text} -> **{entity_text}**")
+            
         elif entity.type == "italic":
-            logger.debug(f"   • Курсив: '{entity_text}'")
-            replacement = f"<i>{entity_text}</i>"
+            # MAX использует *курсив*
+            replacement = f"*{entity_text}*"
+            logger.debug(f"   • Курсив: {entity_text} -> *{entity_text}*")
+            
         elif entity.type == "underline":
-            logger.debug(f"   • Подчеркнутый: '{entity_text}'")
-            replacement = f"<u>{entity_text}</u>"
+            # MAX может не поддерживать подчеркивание, используем _подчеркнутый_
+            replacement = f"_{entity_text}_"
+            logger.debug(f"   • Подчеркнутый: {entity_text} -> _{entity_text}_")
+            
         elif entity.type == "strikethrough":
-            logger.debug(f"   • Зачеркнутый: '{entity_text}'")
-            replacement = f"<s>{entity_text}</s>"
+            # MAX может не поддерживать зачеркивание, используем ~зачеркнутый~
+            replacement = f"~{entity_text}~"
+            logger.debug(f"   • Зачеркнутый: {entity_text} -> ~{entity_text}~")
+            
         elif entity.type == "code":
-            logger.debug(f"   • Моноширинный: '{entity_text}'")
-            replacement = f"<code>{entity_text}</code>"
+            # MAX использует `моноширинный`
+            replacement = f"`{entity_text}`"
+            logger.debug(f"   • Моноширинный: {entity_text} -> `{entity_text}`")
+            
         elif entity.type == "pre":
-            logger.debug(f"   • Блок кода: '{entity_text}'")
-            replacement = f"<pre>{entity_text}</pre>"
+            # MAX использует ```блок кода```
+            replacement = f"```\n{entity_text}\n```"
+            logger.debug(f"   • Блок кода: {entity_text} -> ```...```")
+            
         elif entity.type == "text_link":
+            # MAX использует [текст](url)
             url = entity.url
-            logger.debug(f"   • Ссылка: '{entity_text}' -> {url}")
-            replacement = f'<a href="{url}">{entity_text}</a>'
+            replacement = f"[{entity_text}]({url})"
+            logger.debug(f"   • Ссылка: {entity_text} -> [{entity_text}]({url})")
+            
         elif entity.type == "text_mention":
-            user = entity.user
-            logger.debug(f"   • Упоминание: {entity_text} (ID: {user.id})")
-            replacement = f'<a href="tg://user?id={user.id}">{entity_text}</a>'
-        elif entity.type == "spoiler":
-            logger.debug(f"   • Спойлер: '{entity_text}'")
-            # MAX может не поддерживать спойлеры, используем жирный как fallback
-            replacement = f"<b>[spoiler]</b>{entity_text}<b>[/spoiler]</b>"
+            # MAX использует @username или [имя](tg://user?id=id)
+            if entity.user.username:
+                replacement = f"@{entity.user.username}"
+            else:
+                replacement = f"[{entity_text}](tg://user?id={entity.user.id})"
+            logger.debug(f"   • Упоминание: {entity_text} -> {replacement}")
+            
         else:
-            logger.warning(f"⚠️ Неизвестный тип entity: {entity.type}")
+            logger.warning(f"⚠️ Неподдерживаемый тип: {entity.type}")
             continue
         
-        # Заменяем текст с учетом уже сделанных замен
-        html_text = html_text[:start] + replacement + html_text[end:]
+        # Заменяем в тексте
+        result = result[:start] + replacement + result[end:]
     
-    logger.info(f"📝 Итоговый HTML: {html_text[:200]}...")
-    return html_text
+    return result
+
+def extract_formatted_text(message: types.Message) -> str:
+    """Извлекает текст с конвертацией в формат MAX"""
+    
+    text = message.text or message.caption or ""
+    entities = message.entities or message.caption_entities or []
+    
+    if entities:
+        logger.info(f"📝 Обнаружено форматирование ({len(entities)} entities)")
+        formatted_text = convert_telegram_to_max_format(text, entities)
+        logger.info(f"📤 Текст после конвертации: {formatted_text[:200]}...")
+        return formatted_text
+    else:
+        logger.debug("📝 Обычный текст без форматирования")
+        return text
 
 async def send_to_max_with_logging(text: str, test_name: str = ""):
     """Отправка текста с максимальным логированием"""
@@ -112,19 +129,15 @@ async def send_to_max_with_logging(text: str, test_name: str = ""):
         "Content-Type": "application/json"
     }
     
-    # Формируем данные для отправки
-    message_data = {
-        "text": text,
-        "parse_mode": "HTML"  # Включаем HTML-разметку
-    }
+    # MAX не требует parse_mode, он сам понимает свой формат
+    message_data = {"text": text}
     
     logger.info("="*80)
     logger.info(f"🔬 ТЕСТ: {test_name}")
     logger.info(f"📍 URL: {url}")
     logger.info(f"🔑 TOKEN: {MAX_TOKEN[:10]}...{MAX_TOKEN[-5:]}")
-    logger.info(f"📋 HEADERS: {{'Authorization': '{MAX_TOKEN[:10]}...'}}")
     logger.info(f"📦 CHAT_ID: {MAX_CHANNEL_ID}")
-    logger.info(f"📝 TEXT (raw): {text}")
+    logger.info(f"📝 TEXT (MAX формат): {text[:200]}...")
     logger.info(f"📏 TEXT length: {len(text)}")
     logger.info(f"📦 FULL JSON: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
     logger.info("="*80)
@@ -159,7 +172,7 @@ async def send_to_max_with_logging(text: str, test_name: str = ""):
 
 @dp.message()
 async def forward_to_max(message: types.Message):
-    """Обработчик сообщений с полным форматированием"""
+    """Обработчик сообщений с конвертацией в формат MAX"""
     
     if message.chat.id != TELEGRAM_GROUP_ID:
         return
@@ -167,10 +180,9 @@ async def forward_to_max(message: types.Message):
     logger.info("="*80)
     logger.info(f"📨 ПОЛУЧЕНО СООБЩЕНИЕ ID: {message.message_id}")
     logger.info(f"👤 От: {message.from_user.full_name}")
-    logger.info(f"🤖 Это бот: {message.from_user.is_bot}")
     
-    # Извлекаем текст с форматированием
-    formatted_text = extract_text_with_entities(message)
+    # Извлекаем текст с конвертацией в формат MAX
+    formatted_text = extract_formatted_text(message)
     
     # Добавляем подпись для пересланных сообщений
     if message.forward_date and message.forward_from_chat:
@@ -192,17 +204,15 @@ async def forward_to_max(message: types.Message):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "✅ **БОТ-ПЕРЕСЫЛЬЩИК (ЭТАП 1)**\n\n"
+        "✅ **БОТ-ПЕРЕСЫЛЬЩИК (ЭТАП 1 - ИСПРАВЛЕННЫЙ)**\n\n"
         "📋 **ТЕСТИРУЕМЫЕ ФОРМАТЫ:**\n"
-        "• Жирный текст\n"
-        "• Курсив\n"
-        "• Подчеркнутый\n"
-        "• Зачеркнутый\n"
-        "• Моноширинный\n"
-        "• Ссылки в тексте\n"
-        "• Цитаты\n"
-        "• Эмодзи\n"
-        "• Комбинации\n\n"
+        "• Жирный текст (**жирный**)\n"
+        "• Курсив (*курсив*)\n"
+        "• Подчеркнутый (_подчеркнутый_)\n"
+        "• Зачеркнутый (~зачеркнутый~)\n"
+        "• Моноширинный (`код`)\n"
+        "• Ссылки ([текст](url))\n"
+        "• Эмодзи\n\n"
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
         f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
         "🔍 **Логирование включено** — проверяйте логи после каждого теста"
@@ -212,27 +222,27 @@ async def cmd_start(message: types.Message):
 async def cmd_test1(message: types.Message):
     """Отправляет тестовый набор для проверки"""
     test_text = (
-        "<b>Жирный текст</b>\n"
-        "<i>Курсив</i>\n"
-        "<u>Подчеркнутый</u>\n"
-        "<s>Зачеркнутый</s>\n"
-        "<code>Моноширинный</code>\n"
-        '<a href="https://example.com">Ссылка</a>\n'
+        "**Жирный текст**\n"
+        "*Курсив*\n"
+        "_Подчеркнутый_\n"
+        "~Зачеркнутый~\n"
+        "`Моноширинный`\n"
+        "[Ссылка на example](https://example.com)\n"
         "Эмодзи: 👋 🌍 🎉\n"
         "> Цитата\n"
-        "<b><i>Жирный + Курсив</i></b>\n"
-        "Обычный текст со <b>вставкой</b> форматирования"
+        "***Жирный + Курсив***\n"
+        "Обычный текст со **вставкой** форматирования"
     )
     
     await message.answer("🔄 Отправляю тестовый набор в группу...")
-    await message.answer(test_text, parse_mode="HTML")
+    await message.answer(test_text)
 
 async def main():
     logger.info("="*80)
-    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (ЭТАП 1)")
+    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (ЭТАП 1 - ИСПРАВЛЕННЫЙ)")
     logger.info(f"📤 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
     logger.info(f"📥 MAX_CHANNEL_ID: {MAX_CHANNEL_ID}")
-    logger.info("📋 РЕЖИМ: ПРОВЕРКА ФОРМАТИРОВАНИЯ")
+    logger.info("📋 РЕЖИМ: КОНВЕРТАЦИЯ В ФОРМАТ MAX")
     logger.info("="*80)
     
     await telegram_bot.delete_webhook()
