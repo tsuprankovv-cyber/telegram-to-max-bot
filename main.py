@@ -104,6 +104,7 @@ def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
 def convert_entities_to_markdown(text: str, entities: list) -> str:
     """
     Конвертирует Telegram entities в Markdown для MAX
+    с правильным учетом смещения после каждой замены
     """
     if not entities:
         return text
@@ -112,45 +113,46 @@ def convert_entities_to_markdown(text: str, entities: list) -> str:
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
     result = text
+    offset_correction = 0
+    
     logger.debug(f"🔍 Конвертация {len(entities)} entities в Markdown")
     
     for entity in sorted_entities:
-        start = entity.offset
+        # Корректируем позицию с учетом предыдущих замен
+        start = entity.offset + offset_correction
         end = start + entity.length
-        entity_text = text[start:end]
+        entity_text = result[start:end]
         
-        # Конвертируем в Markdown для MAX
+        # Определяем длину форматирования
         if entity.type == "bold":
-            replacement = f"**{entity_text}**"
-            logger.debug(f"   • Жирный: '{entity_text}'")
-            
+            formatted = f"**{entity_text}**"
+            format_length = 4  # ** **
         elif entity.type == "italic":
-            replacement = f"*{entity_text}*"
-            logger.debug(f"   • Курсив: '{entity_text}'")
-            
+            formatted = f"*{entity_text}*"
+            format_length = 2  # * *
         elif entity.type == "underline":
-            replacement = f"++{entity_text}++"
-            logger.debug(f"   • Подчеркнутый: '{entity_text}'")
-            
+            formatted = f"++{entity_text}++"
+            format_length = 4  # ++ ++
         elif entity.type == "strikethrough":
-            replacement = f"~~{entity_text}~~"
-            logger.debug(f"   • Зачеркнутый: '{entity_text}'")
-            
+            formatted = f"~~{entity_text}~~"
+            format_length = 4  # ~~ ~~
         elif entity.type == "text_link":
-            url = entity.url
-            replacement = f"[{entity_text}]({url})"
-            logger.debug(f"   • Ссылка: '{entity_text}'")
-            
+            formatted = f"[{entity_text}]({entity.url})"
+            format_length = len(entity_text) + len(entity.url) + 4  # [](url)
         elif entity.type == "blockquote":
-            replacement = f"> {entity_text}"
-            logger.debug(f"   • Цитата: '{entity_text}'")
-            
+            formatted = f"> {entity_text}"
+            format_length = 2  # >␣
         else:
-            logger.debug(f"   • Пропускаем {entity.type}")
             continue
         
         # Заменяем в тексте
-        result = result[:start] + replacement + result[end:]
+        result = result[:start] + formatted + result[end:]
+        
+        # Корректируем смещение для следующих entities
+        # Новая длина - старая длина = изменение
+        offset_correction += len(formatted) - len(entity_text)
+        
+        logger.debug(f"   • {entity.type}: '{entity_text}' -> '{formatted}'")
     
     return result
 
@@ -161,35 +163,38 @@ def process_message_text(text: str, entities: list) -> str:
     if not text:
         return text
     
+    # Создаем копии entities
+    entities_copy = []
+    for e in entities:
+        new_e = type('Entity', (), {})()
+        new_e.offset = e.offset
+        new_e.length = e.length
+        new_e.type = e.type
+        if hasattr(e, 'url'):
+            new_e.url = e.url
+        entities_copy.append(new_e)
+    
     # Извлекаем заголовок если есть
-    heading_text, remaining_text, remaining_entities = extract_heading(text, entities)
+    heading_text, remaining_text, remaining_entities = extract_heading(text, entities_copy)
     
     if heading_text:
-        # Находим entities которые относятся к заголовку
-        heading_len = len(heading_text)
-        heading_entities = []
-        other_entities = []
+        # Создаем копии для оставшихся entities
+        remaining_copy = []
+        for e in remaining_entities:
+            new_e = type('Entity', (), {})()
+            new_e.offset = e.offset
+            new_e.length = e.length
+            new_e.type = e.type
+            if hasattr(e, 'url'):
+                new_e.url = e.url
+            remaining_copy.append(new_e)
         
-        for entity in entities:
-            if entity.offset < heading_len:
-                # Это entity из заголовка - копируем как есть
-                heading_entities.append(entity)
-            else:
-                # Это entity из остального текста - смещаем позицию
-                new_entity = type('Entity', (), {})()
-                new_entity.offset = entity.offset - heading_len
-                new_entity.length = entity.length
-                new_entity.type = entity.type
-                if hasattr(entity, 'url'):
-                    new_entity.url = entity.url
-                other_entities.append(new_entity)
-        
-        # Формируем Markdown для заголовка (просто # + текст, без доп форматирования)
+        # Формируем Markdown с заголовком
         heading_markdown = f"# {heading_text}"
         
-        # Обрабатываем оставшийся текст с entities
+        # Обрабатываем оставшийся текст
         if remaining_text:
-            remaining_markdown = convert_entities_to_markdown(remaining_text, other_entities)
+            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_copy)
             result = f"{heading_markdown}\n\n{remaining_markdown}"
         else:
             result = heading_markdown
@@ -198,7 +203,7 @@ def process_message_text(text: str, entities: list) -> str:
         return result
     else:
         # Обычное форматирование без заголовка
-        result = convert_entities_to_markdown(text, entities)
+        result = convert_entities_to_markdown(text, entities_copy)
         logger.info(f"📝 Обычное форматирование")
         return result
 
@@ -254,8 +259,8 @@ async def forward_to_max(message: types.Message):
     logger.info(f"📝 Исходный текст: {text}")
     logger.info(f"📊 Entities: {len(entities)}")
     
-    # Обрабатываем текст (заголовки + форматирование)
-    processed_text = process_message_text(text, entities.copy())
+    # Обрабатываем текст
+    processed_text = process_message_text(text, entities)
     
     # Добавляем подпись для пересланных сообщений
     if message.forward_date and message.forward_from_chat:
@@ -280,13 +285,13 @@ async def cmd_start(message: types.Message):
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
         f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
         "📋 **Форматирование:**\n"
-        "• **Жирный** → **жирный**\n"
-        "• *Курсив* → *курсив*\n"
-        "• ++Подчеркнутый++ → ++подчеркнутый++\n"
-        "• ~~Зачеркнутый~~ → ~~зачеркнутый~~\n"
-        "• [Ссылки](url) → [ссылки](url)\n"
-        "• > Цитаты → > цитаты\n"
-        "• # Заголовки (жирный текст в начале)\n"
+        "• **Жирный**\n"
+        "• *Курсив*\n"
+        "• ++Подчеркнутый++\n"
+        "• ~~Зачеркнутый~~\n"
+        "• [Ссылки](url)\n"
+        "• > Цитаты\n"
+        "• # Заголовки\n"
         "• Эмодзи 👋\n\n"
         "Просто отправьте сообщение в группу!"
     )
