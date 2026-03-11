@@ -35,49 +35,98 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def convert_to_markdown(text: str, entities: list) -> str:
+def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
     """
-    Конвертирует Telegram entities в Markdown для MAX
+    Извлекает заголовок из начала текста если:
+    - Текст начинается с жирных слов
+    - Жирные слова идут подряд
+    - После них есть обычный текст
+    - Это не весь текст
+    """
+    if not entities:
+        return "", text, entities
+    
+    # Сортируем entities по позиции
+    sorted_entities = sorted(entities, key=lambda e: e.offset)
+    
+    # Проверяем, начинается ли текст с жирного
+    first_entity = sorted_entities[0]
+    if first_entity.offset != 0 or first_entity.type != "bold":
+        logger.debug("📝 Текст не начинается с жирного — обычное форматирование")
+        return "", text, entities
+    
+    # Собираем все жирные фрагменты подряд с начала
+    heading_end = 0
+    last_pos = 0
+    heading_entities = []
+    remaining_entities = []
+    
+    logger.info("🔍 Анализ начала текста на заголовок")
+    
+    for i, entity in enumerate(sorted_entities):
+        if entity.offset != last_pos:
+            logger.debug(f"   • Разрыв в позиции {last_pos} -> {entity.offset}")
+            remaining_entities = sorted_entities[i:]
+            break
+            
+        if entity.type != "bold":
+            logger.debug(f"   • Не жирный тип: {entity.type}")
+            remaining_entities = sorted_entities[i:]
+            break
+            
+        heading_end = entity.offset + entity.length
+        last_pos = heading_end
+        heading_entities.append(entity)
+        logger.debug(f"   • Жирный фрагмент: '{text[entity.offset:heading_end]}'")
+    else:
+        # Все entities обработаны и все были жирными
+        remaining_entities = []
+    
+    # Проверяем, есть ли обычный текст после жирных фрагментов
+    text_after = text[heading_end:].lstrip()
+    
+    if not text_after:
+        logger.info("📝 Весь текст жирный — оставляем обычное форматирование")
+        return "", text, entities
+    
+    if not heading_entities:
+        return "", text, entities
+    
+    # Формируем заголовок и оставшийся текст
+    heading_text = text[:heading_end].strip()
+    remaining_text = text_after
+    
+    logger.info(f"✅ Обнаружен заголовок: '{heading_text}'")
+    logger.info(f"📝 Остальной текст: '{remaining_text[:50]}...'")
+    
+    return heading_text, remaining_text, remaining_entities
+
+def convert_entities_to_markdown(text: str, entities: list, offset_shift: int = 0) -> str:
+    """
+    Конвертирует Telegram entities в Markdown для MAX с учетом смещения
     """
     if not entities:
         return text
     
+    # Корректируем позиции entities с учетом смещения
+    adjusted_entities = []
+    for entity in entities:
+        if hasattr(entity, 'offset'):
+            entity.offset += offset_shift
+            adjusted_entities.append(entity)
+    
     # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    sorted_entities = sorted(adjusted_entities, key=lambda e: e.offset, reverse=True)
     
     result = text
-    logger.info(f"🔍 Конвертация {len(entities)} entities")
+    logger.debug(f"🔍 Конвертация {len(entities)} entities в Markdown")
     
-    # Сначала проверяем, есть ли жирный текст в начале для заголовка
-    first_entity = entities[0] if entities else None
-    if first_entity and first_entity.offset == 0 and first_entity.type == "bold":
-        # Проверяем, есть ли обычный текст после (не считая пробелы)
-        text_after = text[first_entity.length:].lstrip()
-        if text_after:
-            # Это заголовок
-            heading_text = text[first_entity.offset:first_entity.offset + first_entity.length]
-            logger.info(f"✅ Заголовок: '{heading_text}'")
-            
-            # Заменяем жирный текст в начале на заголовок
-            # ВСЕГДА добавляем пробел после #
-            replacement = f"# {heading_text}"
-            
-            # Находим, сколько символов было после жирного текста (включая пробелы)
-            after_text = text[first_entity.length:]
-            
-            # Формируем новый текст: заголовок + остальной текст (как есть)
-            result = replacement + after_text
-            
-            # Убираем этот entity из обработки, чтобы не обрабатывать его снова
-            sorted_entities = [e for e in sorted_entities if e.offset != 0]
-    
-    # Обрабатываем остальные entities
     for entity in sorted_entities:
         start = entity.offset
         end = start + entity.length
-        entity_text = result[start:end]
+        entity_text = text[start:end]
         
-        # Применяем форматирование
+        # Конвертируем в Markdown для MAX
         if entity.type == "bold":
             replacement = f"**{entity_text}**"
             logger.debug(f"   • Жирный: '{entity_text}'")
@@ -94,17 +143,9 @@ def convert_to_markdown(text: str, entities: list) -> str:
             replacement = f"~~{entity_text}~~"
             logger.debug(f"   • Зачеркнутый: '{entity_text}'")
             
-        elif entity.type == "code":
-            # Моноширинный - используем обратные кавычки
-            replacement = f"`{entity_text}`"
-            logger.debug(f"   • Моноширинный: '{entity_text}'")
-            
-        elif entity.type == "pre":
-            replacement = f"```\n{entity_text}\n```"
-            logger.debug(f"   • Блок кода: '{entity_text}'")
-            
         elif entity.type == "text_link":
-            replacement = f"[{entity_text}]({entity.url})"
+            url = entity.url
+            replacement = f"[{entity_text}]({url})"
             logger.debug(f"   • Ссылка: '{entity_text}'")
             
         elif entity.type == "blockquote":
@@ -112,6 +153,7 @@ def convert_to_markdown(text: str, entities: list) -> str:
             logger.debug(f"   • Цитата: '{entity_text}'")
             
         else:
+            logger.debug(f"   • Пропускаем {entity.type}")
             continue
         
         # Заменяем в тексте
@@ -119,8 +161,40 @@ def convert_to_markdown(text: str, entities: list) -> str:
     
     return result
 
+def process_message_text(text: str, entities: list) -> str:
+    """
+    Полная обработка текста с выделением заголовков и форматированием
+    """
+    if not text:
+        return text
+    
+    # Извлекаем заголовок если есть
+    heading_text, remaining_text, remaining_entities = extract_heading(text, entities)
+    
+    if heading_text:
+        # Формируем Markdown с заголовком
+        # Заголовок без жирного форматирования (просто текст после #)
+        heading_markdown = f"# {heading_text}"
+        
+        # Обрабатываем оставшийся текст с entities
+        if remaining_text:
+            # Вычисляем смещение для entities (длина заголовка + символы # и \n\n)
+            shift = len(heading_text) + 2 + 2  # # + пробел + \n\n
+            remaining_markdown = convert_entities_to_markdown(remaining_text, remaining_entities, -shift)
+            result = f"{heading_markdown}\n\n{remaining_markdown}"
+        else:
+            result = heading_markdown
+        
+        logger.info(f"✅ Итоговый текст с заголовком")
+        return result
+    else:
+        # Обычное форматирование без заголовка
+        result = convert_entities_to_markdown(text, entities, 0)
+        logger.info(f"📝 Обычное форматирование")
+        return result
+
 async def send_to_max_channel(text: str):
-    """Отправляет сообщение в канал MAX"""
+    """Отправляет сообщение в канал MAX с форматированием Markdown"""
     
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
@@ -168,20 +242,20 @@ async def forward_to_max(message: types.Message):
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
     
-    logger.info(f"📝 Текст: {text}")
+    logger.info(f"📝 Исходный текст: {text}")
     logger.info(f"📊 Entities: {len(entities)}")
     
-    # Конвертируем в Markdown
-    markdown_text = convert_to_markdown(text, entities)
+    # Обрабатываем текст (заголовки + форматирование)
+    processed_text = process_message_text(text, entities.copy())
     
     # Добавляем подпись для пересланных сообщений
     if message.forward_date and message.forward_from_chat:
         source = message.forward_from_chat.title
-        markdown_text = f"📢 Переслано из {source}:\n\n{markdown_text}"
+        processed_text = f"📢 Переслано из {source}:\n\n{processed_text}"
         logger.info(f"🔄 Добавлена подпись об источнике: {source}")
     
     # Отправляем в MAX
-    success = await send_to_max_channel(markdown_text)
+    success = await send_to_max_channel(processed_text)
     
     if success:
         logger.info("✅ СООБЩЕНИЕ ПЕРЕСЛАНО")
@@ -196,28 +270,27 @@ async def cmd_start(message: types.Message):
         "✅ **БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
         f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
-        "📋 **Поддерживаемое форматирование:**\n"
-        "• **Жирный** (**текст**)\n"
-        "• *Курсив* (*текст*)\n"
-        "• ++Подчеркнутый++ (++текст++)\n"
-        "• ~~Зачеркнутый~~ (~~текст~~)\n"
-        "• `Моноширинный` (`текст`)\n"
-        "• [Ссылки](url) ([текст](url))\n"
-        "• > Цитаты (> текст)\n"
+        "📋 **Форматирование:**\n"
+        "• **Жирный** → **жирный**\n"
+        "• *Курсив* → *курсив*\n"
+        "• ++Подчеркнутый++ → ++подчеркнутый++\n"
+        "• ~~Зачеркнутый~~ → ~~зачеркнутый~~\n"
+        "• [Ссылки](url) → [ссылки](url)\n"
+        "• > Цитаты → > цитаты\n"
         "• # Заголовки (жирный текст в начале)\n"
         "• Эмодзи 👋\n\n"
-        "Просто отправьте сообщение с форматированием в группу!"
+        "Просто отправьте сообщение в группу!"
     )
 
 @dp.message(Command("test"))
 async def cmd_test(message: types.Message):
     """Тестовая отправка"""
     test_text = (
-        "**Заголовок без пробела**сразу текст\n\n"
-        "**Заголовок с пробелом** текст\n\n"
-        "Обычный текст с **жирным** и *курсивом*\n\n"
+        "**Важное объявление**\n\n"
+        "Это обычный текст после заголовка.\n\n"
+        "**Просто жирный** в середине текста\n\n"
+        "*Курсив* и **жирный** вместе\n\n"
         "++подчеркнутый++ и ~~зачеркнутый~~\n\n"
-        "`моноширинный код`\n\n"
         "[ссылка](https://example.com)\n\n"
         "> цитата\n\n"
         "👋 эмодзи"
