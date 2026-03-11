@@ -34,108 +34,127 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
+def format_text_with_entities(text: str, entities: list) -> str:
     """
-    Извлекает заголовок из начала текста
+    Применяет форматирование к тексту, проходя по entities от конца к началу
+    """
+    if not entities:
+        return text
+    
+    # Сортируем от конца к началу, чтобы не сбивать позиции
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    result = text
+    
+    for entity in sorted_entities:
+        start = entity.offset
+        end = start + entity.length
+        fragment = result[start:end]
+        
+        # Применяем форматирование
+        if entity.type == "bold":
+            replacement = f"**{fragment}**"
+        elif entity.type == "italic":
+            replacement = f"*{fragment}*"
+        elif entity.type == "underline":
+            replacement = f"++{fragment}++"
+        elif entity.type == "strikethrough":
+            replacement = f"~~{fragment}~~"
+        elif entity.type == "text_link":
+            replacement = f"[{fragment}]({entity.url})"
+        elif entity.type == "blockquote":
+            replacement = f"> {fragment}"
+        else:
+            continue
+        
+        # Заменяем
+        result = result[:start] + replacement + result[end:]
+    
+    return result
+
+def is_heading(text: str, entities: list) -> bool:
+    """
+    Проверяет, является ли начало текста заголовком
+    """
+    if not entities:
+        return False
+    
+    # Сортируем по позиции
+    sorted_entities = sorted(entities, key=lambda e: e.offset)
+    
+    # Проверяем первый entity
+    first = sorted_entities[0]
+    if first.offset != 0 or first.type != "bold":
+        return False
+    
+    # Проверяем, что после жирного есть обычный текст
+    # Находим конец жирного блока
+    last_pos = 0
+    last_bold_end = 0
+    
+    for e in sorted_entities:
+        if e.offset != last_pos:
+            break
+        if e.type != "bold":
+            break
+        last_bold_end = e.offset + e.length
+        last_pos = last_bold_end
+    
+    if last_bold_end == 0:
+        return False
+    
+    # Проверяем текст после жирного
+    text_after = text[last_bold_end:].lstrip()
+    return bool(text_after)
+
+def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
+    """
+    Извлекает заголовок и остальной текст, корректируя entities
     """
     if not entities:
         return "", text, []
     
+    # Сортируем по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
-    first = sorted_entities[0]
     
-    # Проверяем начало
-    if first.offset != 0 or first.type != "bold":
-        return "", text, entities
-    
-    # Собираем все жирные подряд
+    # Находим границу заголовка
     last_pos = 0
     heading_end = 0
-    heading_indices = []
     
-    for i, e in enumerate(sorted_entities):
+    for e in sorted_entities:
         if e.offset != last_pos:
             break
         if e.type != "bold":
             break
         heading_end = e.offset + e.length
         last_pos = heading_end
-        heading_indices.append(i)
     
-    if not heading_indices:
+    if heading_end == 0:
         return "", text, entities
     
-    # Получаем текст после заголовка и считаем пробелы
-    after_text = text[heading_end:]
-    stripped = after_text.lstrip()
-    spaces_count = len(after_text) - len(stripped)
-    
-    if not stripped:
-        return "", text, entities
-    
-    # Заголовок
+    # Получаем заголовок
     heading = text[:heading_end]
     
-    # Смещение для оставшихся entities: длина заголовка + пробелы
-    shift = heading_end + spaces_count
+    # Текст после заголовка (с сохранением пробелов для правильного подсчета)
+    after_raw = text[heading_end:]
+    after_stripped = after_raw.lstrip()
+    spaces = len(after_raw) - len(after_stripped)
     
-    # Корректируем оставшиеся entities
-    remaining = []
-    for i, e in enumerate(sorted_entities):
-        if i <= heading_indices[-1]:
-            continue
-        
-        # Создаем копию с новым смещением
-        new_e = type('Entity', (), {})()
-        new_e.offset = e.offset - shift
-        new_e.length = e.length
-        new_e.type = e.type
-        if hasattr(e, 'url'):
-            new_e.url = e.url
-        remaining.append(new_e)
-    
-    logger.info(f"✅ Заголовок: '{heading[:30]}...' (пробелов: {spaces_count})")
-    return heading, stripped, remaining
-
-def apply_formatting(text: str, entities: list) -> str:
-    """
-    Применяет форматирование с учетом динамического смещения
-    """
-    if not entities:
-        return text
-    
-    # Сортируем с конца
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
-    total_shift = 0
+    # Корректируем entities для остального текста
+    remaining_entities = []
+    shift = heading_end + spaces
     
     for e in sorted_entities:
-        # Корректируем позицию с учетом предыдущих замен
-        pos = e.offset + total_shift
-        end = pos + e.length
-        fragment = result[pos:end]
-        
-        # Определяем замену
-        if e.type == "bold":
-            replacement = f"**{fragment}**"
-        elif e.type == "italic":
-            replacement = f"*{fragment}*"
-        elif e.type == "underline":
-            replacement = f"++{fragment}++"
-        elif e.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-        elif e.type == "text_link":
-            replacement = f"[{fragment}]({e.url})"
-        elif e.type == "blockquote":
-            replacement = f"> {fragment}"
-        else:
-            continue
-        
-        # Заменяем и обновляем смещение
-        result = result[:pos] + replacement + result[end:]
-        total_shift += len(replacement) - len(fragment)
+        if e.offset >= heading_end:
+            new_e = type('Entity', (), {})()
+            new_e.offset = e.offset - shift
+            new_e.length = e.length
+            new_e.type = e.type
+            if hasattr(e, 'url'):
+                new_e.url = e.url
+            remaining_entities.append(new_e)
     
-    return result
+    logger.info(f"✅ Заголовок: '{heading[:30]}...' (пробелов: {spaces})")
+    return heading, after_stripped, remaining_entities
 
 def process_message(text: str, entities: list) -> str:
     """
@@ -144,32 +163,22 @@ def process_message(text: str, entities: list) -> str:
     if not text:
         return text
     
-    # Копируем entities
-    entities_copy = []
-    for e in entities:
-        new_e = type('Entity', (), {})()
-        new_e.offset = e.offset
-        new_e.length = e.length
-        new_e.type = e.type
-        if hasattr(e, 'url'):
-            new_e.url = e.url
-        entities_copy.append(new_e)
-    
-    # Проверяем заголовок
-    heading, rest, rest_entities = extract_heading(text, entities_copy)
-    
-    if heading:
-        # Заголовок
-        heading_md = f"# {heading}"
+    # Проверяем, является ли начало заголовком
+    if is_heading(text, entities):
+        # Извлекаем заголовок и остальной текст
+        heading, rest, rest_entities = extract_heading_text(text, entities)
         
-        # Остальной текст
+        # Форматируем заголовок (просто добавляем #, без жирного)
+        heading_formatted = f"# {heading}"
+        
+        # Форматируем остальной текст
         if rest:
-            rest_md = apply_formatting(rest, rest_entities)
-            return f"{heading_md}\n\n{rest_md}"
-        return heading_md
+            rest_formatted = format_text_with_entities(rest, rest_entities)
+            return f"{heading_formatted}\n\n{rest_formatted}"
+        return heading_formatted
     
     # Обычное форматирование
-    return apply_formatting(text, entities_copy)
+    return format_text_with_entities(text, entities)
 
 async def send_to_max(text: str):
     """Отправка в MAX"""
