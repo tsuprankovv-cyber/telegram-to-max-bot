@@ -6,9 +6,9 @@ import json
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# === НАСТРОЙКА МАКСИМАЛЬНОГО ЛОГИРОВАНИЯ ===
+# === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -35,189 +35,130 @@ logger.info("="*80)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def debug_entities(text: str, entities: list, stage: str):
-    """Отладочная функция для печати entities"""
-    logger.debug(f"🔍 ENTITIES [{stage}]:")
-    for i, e in enumerate(entities):
-        entity_text = text[e.offset:e.offset + e.length] if e.offset < len(text) else "OUT_OF_RANGE"
-        logger.debug(f"   {i}: type={e.type}, offset={e.offset}, len={e.length}, text='{entity_text}'")
-
-def extract_heading_debug(text: str, entities: list) -> tuple[str, str, list, dict]:
+def extract_heading(text: str, entities: list) -> tuple[str, str, list]:
     """
-    Извлекает заголовок с максимальным логированием
+    Извлекает заголовок из начала текста если:
+    - Текст начинается с жирных слов
+    - Жирные слова идут подряд
+    - После них есть обычный текст
+    - Это не весь текст
     """
-    result = {
-        "original_text": text,
-        "original_entities_count": len(entities),
-        "heading_text": "",
-        "remaining_text": "",
-        "heading_end_pos": 0,
-        "spaces_removed": 0
-    }
-    
     if not entities:
-        logger.debug("📭 Нет entities")
-        return "", text, entities, result
+        return "", text, entities
     
     # Сортируем entities по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
-    debug_entities(text, sorted_entities, "original")
     
-    # Проверяем начало
-    first = sorted_entities[0]
-    if first.offset != 0 or first.type != "bold":
-        logger.debug(f"📝 Не заголовок: first offset={first.offset}, type={first.type}")
-        return "", text, entities, result
+    # Проверяем, начинается ли текст с жирного
+    first_entity = sorted_entities[0]
+    if first_entity.offset != 0 or first_entity.type != "bold":
+        return "", text, entities
     
-    # Собираем жирные подряд
+    # Собираем все жирные фрагменты подряд с начала
     heading_end = 0
     last_pos = 0
     heading_indices = []
     
-    logger.debug("📊 Анализ последовательности жирных:")
-    
-    for i, e in enumerate(sorted_entities):
-        logger.debug(f"   entity {i}: offset={e.offset}, type={e.type}, last_pos={last_pos}")
-        
-        if e.offset != last_pos:
-            logger.debug(f"   → разрыв на entity {i}")
+    for i, entity in enumerate(sorted_entities):
+        if entity.offset != last_pos:
             break
             
-        if e.type != "bold":
-            logger.debug(f"   → не жирный на entity {i}")
+        if entity.type != "bold":
             break
             
-        heading_end = e.offset + e.length
+        heading_end = entity.offset + entity.length
         last_pos = heading_end
         heading_indices.append(i)
-        logger.debug(f"   → добавили жирный до {heading_end}")
     
     if not heading_indices:
-        logger.debug("📝 Нет жирных в начале")
-        return "", text, entities, result
+        return "", text, entities
     
-    # Проверяем текст после
-    text_after_raw = text[heading_end:]
-    text_after_stripped = text_after_raw.lstrip()
-    spaces_removed = len(text_after_raw) - len(text_after_stripped)
-    
-    result["heading_end_pos"] = heading_end
-    result["spaces_removed"] = spaces_removed
-    
-    logger.debug(f"📏 После жирных: heading_end={heading_end}")
-    logger.debug(f"   raw after ({len(text_after_raw)}): '{text_after_raw[:30]}...'")
-    logger.debug(f"   stripped ({len(text_after_stripped)}): '{text_after_stripped[:30]}...'")
-    logger.debug(f"   удалено пробелов: {spaces_removed}")
+    # Проверяем, есть ли обычный текст после жирных фрагментов
+    # Сохраняем информацию о пробелах!
+    text_after = text[heading_end:]
+    text_after_stripped = text_after.lstrip()
+    spaces_count = len(text_after) - len(text_after_stripped)
     
     if not text_after_stripped:
-        logger.debug("📝 Нет текста после жирных")
-        return "", text, entities, result
+        return "", text, entities
     
-    # Формируем результат
+    # Формируем заголовок и оставшийся текст
     heading_text = text[:heading_end]
     remaining_text = text_after_stripped
     
-    # Корректируем оставшиеся entities
+    # Создаем копии оставшихся entities с правильным смещением
     remaining_entities = []
-    for i, e in enumerate(sorted_entities):
+    for i, entity in enumerate(sorted_entities):
         if i <= heading_indices[-1]:
             continue
         
-        # Смещаем позицию с учетом удаленных пробелов
-        new_offset = e.offset - heading_end - spaces_removed
-        
-        # Создаем копию entity
-        new_e = type('Entity', (), {})()
-        new_e.offset = new_offset
-        new_e.length = e.length
-        new_e.type = e.type
-        if hasattr(e, 'url'):
-            new_e.url = e.url
-        
-        remaining_entities.append(new_e)
-        logger.debug(f"   → entity {i}: offset {e.offset} -> {new_offset}")
+        # Смещаем позицию с учетом длины заголовка И удаленных пробелов
+        new_entity = type('Entity', (), {})()
+        new_entity.offset = entity.offset - heading_end - spaces_count
+        new_entity.length = entity.length
+        new_entity.type = entity.type
+        if hasattr(entity, 'url'):
+            new_entity.url = entity.url
+        remaining_entities.append(new_entity)
     
-    result["heading_text"] = heading_text
-    result["remaining_text"] = remaining_text
-    result["remaining_entities_count"] = len(remaining_entities)
+    logger.info(f"✅ Заголовок: '{heading_text[:30]}...' (пробелов после: {spaces_count})")
     
-    logger.info(f"✅ Заголовок: '{heading_text[:50]}...'")
-    debug_entities(remaining_text, remaining_entities, "remaining")
-    
-    return heading_text, remaining_text, remaining_entities, result
+    return heading_text, remaining_text, remaining_entities
 
-def apply_formatting_debug(text: str, entities: list, stage: str) -> str:
+def apply_formatting(text: str, entities: list) -> str:
     """
-    Применяет форматирование с максимальным логированием
+    Применяет форматирование к тексту с учетом смещения
     """
     if not entities:
         return text
-    
-    logger.debug(f"🎨 ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ [{stage}]")
-    debug_entities(text, entities, f"before_{stage}")
     
     # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
     result = text
-    total_shift = 0
+    offset_correction = 0
     
-    for i, e in enumerate(sorted_entities):
-        start = e.offset
-        end = start + e.length
+    for entity in sorted_entities:
+        # Корректируем позицию с учетом предыдущих замен
+        start = entity.offset + offset_correction
+        end = start + entity.length
         entity_text = result[start:end]
         
-        logger.debug(f"   обработка {i}: {e.type} '{entity_text}' at {start}")
-        
-        # Определяем формат
-        if e.type == "bold":
+        # Применяем форматирование
+        if entity.type == "bold":
             replacement = f"**{entity_text}**"
-            shift = 4
-        elif e.type == "italic":
+            format_length = 4
+        elif entity.type == "italic":
             replacement = f"*{entity_text}*"
-            shift = 2
-        elif e.type == "underline":
+            format_length = 2
+        elif entity.type == "underline":
             replacement = f"++{entity_text}++"
-            shift = 4
-        elif e.type == "strikethrough":
+            format_length = 4
+        elif entity.type == "strikethrough":
             replacement = f"~~{entity_text}~~"
-            shift = 4
-        elif e.type == "text_link":
-            replacement = f"[{entity_text}]({e.url})"
-            shift = len(entity_text) + len(e.url) + 4
-        elif e.type == "blockquote":
+            format_length = 4
+        elif entity.type == "text_link":
+            replacement = f"[{entity_text}]({entity.url})"
+            format_length = len(entity_text) + len(entity.url) + 4
+        elif entity.type == "blockquote":
             replacement = f"> {entity_text}"
-            shift = 2
+            format_length = 2
         else:
-            logger.debug(f"   ⏭️ пропускаем {e.type}")
             continue
         
-        # Заменяем
-        old_len = len(entity_text)
-        new_len = len(replacement)
+        # Заменяем в тексте
         result = result[:start] + replacement + result[end:]
         
-        # Корректируем позиции следующих entities
-        shift_diff = new_len - old_len
-        total_shift += shift_diff
-        
-        logger.debug(f"   ✅ замена: '{entity_text}' -> '{replacement}'")
-        logger.debug(f"      old_len={old_len}, new_len={new_len}, shift_diff={shift_diff}, total_shift={total_shift}")
+        # Корректируем смещение для следующих entities
+        offset_correction += len(replacement) - len(entity_text)
     
-    logger.debug(f"📤 РЕЗУЛЬТАТ [{stage}]: {result[:100]}...")
     return result
 
-def process_message_debug(text: str, entities: list) -> str:
+def process_message_text(text: str, entities: list) -> str:
     """
-    Полная обработка с максимальным логированием
+    Полная обработка текста с заголовками и форматированием
     """
-    logger.info("="*80)
-    logger.info("🚀 НАЧАЛО ОБРАБОТКИ СООБЩЕНИЯ")
-    logger.info(f"📝 Исходный текст: {text[:100]}...")
-    logger.info(f"📊 Всего entities: {len(entities)}")
-    
     if not text:
-        logger.warning("⚠️ Пустой текст")
         return text
     
     # Копируем entities
@@ -232,34 +173,23 @@ def process_message_debug(text: str, entities: list) -> str:
         entities_copy.append(new_e)
     
     # Извлекаем заголовок
-    heading_text, remaining_text, remaining_entities, heading_info = extract_heading_debug(text, entities_copy)
+    heading_text, remaining_text, remaining_entities = extract_heading(text, entities_copy)
     
     if heading_text:
-        logger.info("📌 ОБРАБОТКА С ЗАГОЛОВКОМ")
-        logger.info(f"   Заголовок: '{heading_text}'")
-        logger.info(f"   Остальной текст: '{remaining_text[:50]}...'")
-        logger.info(f"   Entities осталось: {len(remaining_entities)}")
-        
-        # Формируем заголовок
+        # Заголовок (без дополнительного форматирования жирным, только #)
         heading_markdown = f"# {heading_text}"
-        logger.debug(f"   Заголовок markdown: '{heading_markdown}'")
         
         # Обрабатываем остальной текст
-        if remaining_text and remaining_entities:
-            remaining_markdown = apply_formatting_debug(remaining_text, remaining_entities, "remaining")
+        if remaining_text:
+            remaining_markdown = apply_formatting(remaining_text, remaining_entities)
             result = f"{heading_markdown}\n\n{remaining_markdown}"
-        elif remaining_text:
-            result = f"{heading_markdown}\n\n{remaining_text}"
         else:
             result = heading_markdown
         
-        logger.info(f"✅ Итоговый текст с заголовком: {result[:100]}...")
         return result
     else:
-        logger.info("📝 ОБЫЧНОЕ ФОРМАТИРОВАНИЕ")
-        result = apply_formatting_debug(text, entities_copy, "full")
-        logger.info(f"✅ Итоговый текст: {result[:100]}...")
-        return result
+        # Обычное форматирование
+        return apply_formatting(text, entities_copy)
 
 async def send_to_max_channel(text: str):
     """Отправляет сообщение в канал MAX"""
@@ -277,17 +207,12 @@ async def send_to_max_channel(text: str):
     
     logger.info("="*80)
     logger.info("📤 ОТПРАВКА В MAX КАНАЛ")
-    logger.info(f"📍 URL: {url}")
-    logger.info(f"📝 Текст для отправки: {text[:200]}...")
-    logger.info(f"📦 Данные запроса: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
+    logger.info(f"📝 Текст: {text[:200]}...")
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=message_data) as resp:
                 response_text = await resp.text()
-                
-                logger.info(f"📥 Статус ответа: {resp.status}")
-                logger.info(f"📥 Тело ответа: {response_text}")
                 
                 if resp.status == 200:
                     logger.info("✅ УСПЕШНО ОТПРАВЛЕНО!")
@@ -308,29 +233,20 @@ async def forward_to_max(message: types.Message):
     
     logger.info("="*80)
     logger.info(f"📨 ПОЛУЧЕНО СООБЩЕНИЕ ID: {message.message_id}")
-    logger.info(f"👤 От: {message.from_user.full_name}")
-    logger.info(f"🤖 Это бот: {message.from_user.is_bot}")
     
-    # Получаем данные
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
     
-    # Обрабатываем
-    processed_text = process_message_debug(text, entities.copy())
+    # Обрабатываем текст
+    processed_text = process_message_text(text, entities)
     
     # Добавляем подпись для пересланных
     if message.forward_date and message.forward_from_chat:
         source = message.forward_from_chat.title
         processed_text = f"📢 Переслано из {source}:\n\n{processed_text}"
-        logger.info(f"🔄 Добавлена подпись об источнике: {source}")
     
     # Отправляем
-    success = await send_to_max_channel(processed_text)
-    
-    if success:
-        logger.info("✅ СООБЩЕНИЕ ПЕРЕСЛАНО")
-    else:
-        logger.error("❌ НЕ УДАЛОСЬ ПЕРЕСЛАТЬ")
+    await send_to_max_channel(processed_text)
     
     logger.info("="*80)
 
@@ -339,24 +255,11 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "✅ **БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
-        f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
-        "📋 **Форматирование:**\n"
-        "• **Жирный**\n"
-        "• *Курсив*\n"
-        "• ++Подчеркнутый++\n"
-        "• ~~Зачеркнутый~~\n"
-        "• [Ссылки](url)\n"
-        "• > Цитаты\n"
-        "• # Заголовки\n"
-        "• Эмодзи 👋\n\n"
-        "Просто отправьте сообщение в группу!"
+        f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`"
     )
 
 async def main():
     logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА")
-    logger.info(f"📤 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
-    logger.info(f"📥 MAX_CHANNEL_ID: {MAX_CHANNEL_ID}")
-    
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
