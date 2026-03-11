@@ -3,7 +3,6 @@ import asyncio
 import logging
 import aiohttp
 import json
-import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
@@ -36,21 +35,6 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def normalize_whitespace(text: str) -> str:
-    """
-    Нормализует пробелы в тексте:
-    - Убирает множественные пробелы
-    - Оставляет один пробел между словами
-    - Сохраняет переносы строк
-    """
-    # Заменяем множественные пробелы на один
-    text = re.sub(r' +', ' ', text)
-    # Убираем пробелы в начале строк
-    text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)
-    # Убираем пробелы в конце строк
-    text = re.sub(r'\s+$', '', text, flags=re.MULTILINE)
-    return text
-
 def convert_to_markdown(text: str, entities: list) -> str:
     """
     Конвертирует Telegram entities в Markdown для MAX
@@ -64,53 +48,37 @@ def convert_to_markdown(text: str, entities: list) -> str:
     result = text
     logger.info(f"🔍 Конвертация {len(entities)} entities")
     
+    # Сначала проверяем, есть ли жирный текст в начале для заголовка
+    first_entity = entities[0] if entities else None
+    if first_entity and first_entity.offset == 0 and first_entity.type == "bold":
+        # Проверяем, есть ли обычный текст после (не считая пробелы)
+        text_after = text[first_entity.length:].lstrip()
+        if text_after:
+            # Это заголовок
+            heading_text = text[first_entity.offset:first_entity.offset + first_entity.length]
+            logger.info(f"✅ Заголовок: '{heading_text}'")
+            
+            # Заменяем жирный текст в начале на заголовок
+            # ВСЕГДА добавляем пробел после #
+            replacement = f"# {heading_text}"
+            
+            # Находим, сколько символов было после жирного текста (включая пробелы)
+            after_text = text[first_entity.length:]
+            
+            # Формируем новый текст: заголовок + остальной текст (как есть)
+            result = replacement + after_text
+            
+            # Убираем этот entity из обработки, чтобы не обрабатывать его снова
+            sorted_entities = [e for e in sorted_entities if e.offset != 0]
+    
+    # Обрабатываем остальные entities
     for entity in sorted_entities:
         start = entity.offset
         end = start + entity.length
-        entity_text = text[start:end]
+        entity_text = result[start:end]
         
         # Применяем форматирование
         if entity.type == "bold":
-            # Проверяем, является ли этот жирный текст началом всего сообщения
-            is_at_start = (start == 0)
-            
-            # Проверяем, есть ли обычный текст после (игнорируем пробелы)
-            text_after = text[end:].lstrip()
-            has_text_after = bool(text_after)
-            
-            # Проверяем, не является ли весь текст жирным
-            all_bold = True
-            for e in entities:
-                if e.type != "bold":
-                    all_bold = False
-                    break
-            
-            # Условия для заголовка:
-            # 1. Это самый первый элемент И
-            # 2. После него есть обычный текст (не считая пробелов) И
-            # 3. Не весь текст жирный
-            if is_at_start and has_text_after and not all_bold:
-                logger.info(f"✅ Заголовок: '{entity_text}'")
-                
-                # Определяем, сколько пробелов было после жирного текста
-                spaces_after = 0
-                for char in text[end:]:
-                    if char == ' ':
-                        spaces_after += 1
-                    else:
-                        break
-                
-                # Формируем заголовок с нормализованным пробелом
-                heading = f"# {entity_text}"
-                
-                # Убираем пробелы после жирного текста из результата
-                result = result[:start] + heading + result[end + spaces_after:]
-                
-                # Нормализуем пробелы во всем тексте
-                result = normalize_whitespace(result)
-                continue
-            
-            # Обычный жирный текст
             replacement = f"**{entity_text}**"
             logger.debug(f"   • Жирный: '{entity_text}'")
             
@@ -127,6 +95,7 @@ def convert_to_markdown(text: str, entities: list) -> str:
             logger.debug(f"   • Зачеркнутый: '{entity_text}'")
             
         elif entity.type == "code":
+            # Моноширинный - используем обратные кавычки
             replacement = f"`{entity_text}`"
             logger.debug(f"   • Моноширинный: '{entity_text}'")
             
@@ -236,8 +205,7 @@ async def cmd_start(message: types.Message):
         "• [Ссылки](url) ([текст](url))\n"
         "• > Цитаты (> текст)\n"
         "• # Заголовки (жирный текст в начале)\n"
-        "• Эмодзи 👋\n"
-        "• Автоматическая нормализация пробелов\n\n"
+        "• Эмодзи 👋\n\n"
         "Просто отправьте сообщение с форматированием в группу!"
     )
 
@@ -245,7 +213,8 @@ async def cmd_start(message: types.Message):
 async def cmd_test(message: types.Message):
     """Тестовая отправка"""
     test_text = (
-        "**Заголовок теста**   \n\n"
+        "**Заголовок без пробела**сразу текст\n\n"
+        "**Заголовок с пробелом** текст\n\n"
         "Обычный текст с **жирным** и *курсивом*\n\n"
         "++подчеркнутый++ и ~~зачеркнутый~~\n\n"
         "`моноширинный код`\n\n"
