@@ -35,105 +35,78 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def create_max_attachments_from_entities(text: str, entities: list) -> list:
+def convert_entities_to_markdown(text: str, entities: list) -> str:
     """
-    Создает attachment'ы для MAX на основе entities из Telegram
+    Конвертирует Telegram entities в Markdown для MAX
     """
-    attachments = []
-    
     if not entities:
-        return attachments
+        return text
     
-    logger.info(f"🔍 Создание attachment'ов для {len(entities)} entities")
+    # Сортируем entities от конца к началу
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     
-    for entity in entities:
+    result = text
+    logger.info(f"🔍 Конвертация {len(entities)} entities в Markdown")
+    
+    for entity in sorted_entities:
         start = entity.offset
         end = start + entity.length
         entity_text = text[start:end]
         
-        # Определяем тип форматирования для MAX
+        # Конвертируем в Markdown для MAX
         if entity.type == "bold":
-            attachment = {
-                "type": "bold",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Жирный: '{entity_text}' (offset: {start}, length: {entity.length})")
+            # Markdown: **жирный**
+            replacement = f"**{entity_text}**"
+            logger.debug(f"   • Жирный: '{entity_text}' -> **{entity_text}**")
             
         elif entity.type == "italic":
-            attachment = {
-                "type": "italic",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Курсив: '{entity_text}'")
+            # Markdown: *курсив*
+            replacement = f"*{entity_text}*"
+            logger.debug(f"   • Курсив: '{entity_text}' -> *{entity_text}*")
             
         elif entity.type == "underline":
-            attachment = {
-                "type": "underline",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Подчеркнутый: '{entity_text}'")
+            # В Markdown нет подчеркивания, используем *курсив* как аналог
+            replacement = f"*{entity_text}*"
+            logger.debug(f"   • Подчеркнутый (как курсив): '{entity_text}' -> *{entity_text}*")
             
         elif entity.type == "strikethrough":
-            attachment = {
-                "type": "strikethrough",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Зачеркнутый: '{entity_text}'")
+            # Markdown: ~~зачеркнутый~~
+            replacement = f"~~{entity_text}~~"
+            logger.debug(f"   • Зачеркнутый: '{entity_text}' -> ~~{entity_text}~~")
             
         elif entity.type == "code":
-            attachment = {
-                "type": "code",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Моноширинный: '{entity_text}'")
+            # Markdown: `код`
+            replacement = f"`{entity_text}`"
+            logger.debug(f"   • Моноширинный: '{entity_text}' -> `{entity_text}`")
+            
+        elif entity.type == "pre":
+            # Markdown: ```код```
+            replacement = f"```\n{entity_text}\n```"
+            logger.debug(f"   • Блок кода: '{entity_text}' -> ```...```")
             
         elif entity.type == "text_link":
-            attachment = {
-                "type": "link",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length,
-                    "url": entity.url
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Ссылка: '{entity_text}' -> {entity.url}")
+            # Markdown: [текст](url)
+            url = entity.url
+            replacement = f"[{entity_text}]({url})"
+            logger.debug(f"   • Ссылка: '{entity_text}' -> [{entity_text}]({url})")
             
         elif entity.type == "blockquote":
-            attachment = {
-                "type": "blockquote",
-                "payload": {
-                    "offset": start,
-                    "length": entity.length
-                }
-            }
-            attachments.append(attachment)
-            logger.debug(f"   • Цитата: '{entity_text}'")
+            # В Markdown нет цитат, используем > 
+            replacement = f"> {entity_text}"
+            logger.debug(f"   • Цитата: '{entity_text}' -> > {entity_text}")
+            
+        else:
+            logger.warning(f"⚠️ Неподдерживаемый тип: {entity.type}")
+            continue
+        
+        # Заменяем в тексте
+        result = result[:start] + replacement + result[end:]
     
-    return attachments
+    logger.info(f"📤 Итоговый Markdown: {result[:200]}...")
+    return result
 
-async def send_to_max_channel(text: str, attachments: list = None):
-    """Отправляет сообщение в канал MAX"""
+async def send_to_max_channel(text: str):
+    """Отправляет сообщение в канал MAX с форматированием Markdown"""
     
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
@@ -141,27 +114,31 @@ async def send_to_max_channel(text: str, attachments: list = None):
         "Content-Type": "application/json"
     }
     
-    message_data = {"text": text}
-    if attachments:
-        message_data["attachments"] = attachments
+    # Используем Markdown форматирование [citation:3][citation:4]
+    message_data = {
+        "text": text,
+        "format": "markdown"  # КЛЮЧЕВОЙ ПАРАМЕТР!
+    }
     
     logger.info("="*70)
     logger.info("📤 ОТПРАВКА В MAX КАНАЛ")
     logger.info(f"📍 URL: {url}")
-    logger.info(f"📝 Текст: {text[:100]}...")
-    logger.info(f"📎 Attachments: {json.dumps(attachments, indent=2, ensure_ascii=False) if attachments else 'нет'}")
+    logger.info(f"📝 Текст (Markdown): {text[:100]}...")
+    logger.info(f"📦 Полный запрос: {json.dumps(message_data, indent=2, ensure_ascii=False)}")
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=message_data) as resp:
                 response_text = await resp.text()
                 
+                logger.info(f"📥 Статус ответа: {resp.status}")
+                logger.info(f"📥 Тело ответа: {response_text}")
+                
                 if resp.status == 200:
                     logger.info("✅ УСПЕШНО ОТПРАВЛЕНО!")
                     return True
                 else:
                     logger.error(f"❌ ОШИБКА MAX: {resp.status}")
-                    logger.error(f"📥 Ответ: {response_text}")
                     return False
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
@@ -182,14 +159,20 @@ async def forward_to_max(message: types.Message):
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
     
-    logger.info(f"📝 Текст: {text}")
+    logger.info(f"📝 Исходный текст: {text}")
     logger.info(f"📊 Entities: {len(entities)}")
     
-    # Создаем attachment'ы для MAX
-    attachments = create_max_attachments_from_entities(text, entities)
+    # Конвертируем entities в Markdown
+    markdown_text = convert_entities_to_markdown(text, entities)
+    
+    # Добавляем подпись для пересланных сообщений
+    if message.forward_date and message.forward_from_chat:
+        source = message.forward_from_chat.title
+        markdown_text = f"📢 Переслано из {source}:\n\n{markdown_text}"
+        logger.info(f"🔄 Добавлена подпись об источнике: {source}")
     
     # Отправляем в MAX
-    success = await send_to_max_channel(text, attachments)
+    success = await send_to_max_channel(markdown_text)
     
     if success:
         logger.info("✅ СООБЩЕНИЕ ПЕРЕСЛАНО")
@@ -205,24 +188,35 @@ async def cmd_start(message: types.Message):
         f"📤 **Источник:** группа `{TELEGRAM_GROUP_ID}`\n"
         f"📥 **Приёмник:** канал `{MAX_CHANNEL_ID}`\n\n"
         "📋 **Поддерживаемое форматирование:**\n"
-        "• Жирный\n"
-        "• Курсив\n"
-        "• Подчеркнутый\n"
-        "• Зачеркнутый\n"
-        "• Моноширинный\n"
-        "• Ссылки\n"
-        "• Цитаты"
+        "• Жирный (**текст**)\n"
+        "• Курсив (*текст*)\n"
+        "• Зачеркнутый (~~текст~~)\n"
+        "• Моноширинный (`текст`)\n"
+        "• Ссылки ([текст](url))\n\n"
+        "Просто отправьте сообщение с форматированием в группу!"
     )
 
 @dp.message(Command("test"))
 async def cmd_test(message: types.Message):
-    """Тестовая отправка"""
-    test_text = "Тестовое сообщение с форматированием"
-    await send_to_max_channel(test_text)
-    await message.answer("✅ Тест отправлен")
+    """Тестовая отправка с примерами форматирования"""
+    test_text = (
+        "**жирный текст**\n"
+        "*курсив*\n"
+        "~~зачеркнутый~~\n"
+        "`моноширинный`\n"
+        "[ссылка на example](https://example.com)\n"
+        "👋 эмодзи\n"
+        "**жирный** и *курсив* вместе"
+    )
+    await message.answer("🔄 Отправляю тестовое сообщение с форматированием...")
+    success = await send_to_max_channel(test_text)
+    if success:
+        await message.answer("✅ Тест отправлен!")
+    else:
+        await message.answer("❌ Ошибка")
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА")
+    logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (С Markdown)")
     logger.info(f"📤 TELEGRAM_GROUP_ID: {TELEGRAM_GROUP_ID}")
     logger.info(f"📥 MAX_CHANNEL_ID: {MAX_CHANNEL_ID}")
     
