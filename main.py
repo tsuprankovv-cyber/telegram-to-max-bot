@@ -94,51 +94,28 @@ def fix_utf16_entities(text: str, entities: list) -> list:
         # В UTF-16 пространстве
         start_utf16 = entity.offset
         end_utf16 = entity.offset + entity.length
+        
+        # Получаем текст фрагмента в UTF-16
         fragment_utf16 = text_utf16[start_utf16:end_utf16]
         
-        # Находим реальные позиции в обычном тексте
-        # Считаем количество обычных символов до start_utf16
-        prefix_utf16 = text_utf16[:start_utf16]
-        # Удаляем суррогаты из префикса
-        prefix_normal = []
-        i = 0
-        while i < len(prefix_utf16):
-            if i + 1 < len(prefix_utf16) and ord(prefix_utf16[i]) >= 0xD800 and ord(prefix_utf16[i]) <= 0xDBFF and ord(prefix_utf16[i+1]) >= 0xDC00 and ord(prefix_utf16[i+1]) <= 0xDFFF:
-                # Суррогатная пара - пропускаем два символа
-                i += 2
-            elif ord(prefix_utf16[i]) >= 0xD800 and ord(prefix_utf16[i]) <= 0xDFFF:
-                # Одиночный суррогат - пропускаем
-                i += 1
-            else:
-                prefix_normal.append(prefix_utf16[i])
-                i += 1
-        real_start = len(prefix_normal)
+        # Удаляем суррогаты для получения обычного текста
+        fragment_normal = remove_surrogates(fragment_utf16)
         
-        # Считаем количество обычных символов во фрагменте
-        fragment_normal = []
-        i = 0
-        while i < len(fragment_utf16):
-            if i + 1 < len(fragment_utf16) and ord(fragment_utf16[i]) >= 0xD800 and ord(fragment_utf16[i]) <= 0xDBFF and ord(fragment_utf16[i+1]) >= 0xDC00 and ord(fragment_utf16[i+1]) <= 0xDFFF:
-                # Суррогатная пара - пропускаем два символа
-                i += 2
-            elif ord(fragment_utf16[i]) >= 0xD800 and ord(fragment_utf16[i]) <= 0xDFFF:
-                # Одиночный суррогат - пропускаем
-                i += 1
-            else:
-                fragment_normal.append(fragment_utf16[i])
-                i += 1
-        real_length = len(fragment_normal)
+        # Находим реальную позицию в обычном тексте
+        prefix_utf16 = text_utf16[:start_utf16]
+        prefix_normal = remove_surrogates(prefix_utf16)
+        real_start = len(prefix_normal)
         
         # Создаём новый entity с правильными позициями
         new_e = type('Entity', (), {})()
         new_e.offset = real_start
-        new_e.length = real_length
+        new_e.length = len(fragment_normal)
         new_e.type = entity.type
         if hasattr(entity, 'url'):
             new_e.url = entity.url
         
         fixed_entities.append(new_e)
-        logger.debug(f"🧬 UTF-16 fix: {entity.type} {entity.offset}->{real_start}, len={entity.length}->{real_length}")
+        logger.debug(f"🧬 UTF-16 fix: {entity.type} {entity.offset}->{real_start}, len={entity.length}->{len(fragment_normal)}")
     
     return fixed_entities
 
