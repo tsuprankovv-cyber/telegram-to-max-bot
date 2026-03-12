@@ -37,7 +37,7 @@ logger.info("="*80)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# === ТРАНСЛИТЕРАЦИЯ (из media кода) ===
+# === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
     'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
@@ -83,7 +83,7 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ИЗ РАБОЧЕГО КОДА) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
 def format_text_with_entities(text: str, entities: list) -> str:
     """Применяет форматирование к тексту"""
     if not entities:
@@ -117,16 +117,28 @@ def format_text_with_entities(text: str, entities: list) -> str:
     return result
 
 def is_heading(text: str, entities: list) -> bool:
-    """Проверяет, является ли начало заголовком"""
+    """
+    Проверяет, является ли начало текста заголовком
+    """
     if not entities or not text:
         return False
     
+    # Сортируем по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
+    
+    # Проверяем первый entity
     first = sorted_entities[0]
     
-    if first.offset != 0 or first.type != "bold":
+    # Если первый entity не с 0 позиции - перед ним есть обычный текст
+    # Это не заголовок!
+    if first.offset != 0:
         return False
     
+    # Если первый элемент не жирный
+    if first.type != "bold":
+        return False
+    
+    # Находим конец жирного блока
     last_pos = 0
     last_bold_end = 0
     
@@ -141,8 +153,14 @@ def is_heading(text: str, entities: list) -> bool:
     if last_bold_end == 0:
         return False
     
+    # Проверяем текст после жирного
     text_after = text[last_bold_end:].lstrip()
-    return bool(text_after)
+    
+    # Если после жирного нет текста - не заголовок
+    if not text_after:
+        return False
+    
+    return True
 
 def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
     """Извлекает заголовок"""
@@ -183,6 +201,7 @@ def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
                 new_e.url = e.url
             remaining_entities.append(new_e)
     
+    logger.info(f"✅ Заголовок: '{heading[:30]}...'")
     return heading, after_stripped, remaining_entities
 
 def process_text_message(text: str, entities: list) -> str:
@@ -201,7 +220,7 @@ def process_text_message(text: str, entities: list) -> str:
     
     return format_text_with_entities(text, entities)
 
-# === КЛАССЫ ДЛЯ МЕДИА (ИЗ РАБОЧЕГО КОДА) ===
+# === КЛАССЫ ДЛЯ МЕДИА ===
 class MediaUploader:
     """Загрузчик медиа"""
     
@@ -230,8 +249,7 @@ class MediaUploader:
         
         async with self.session.post(url, headers=headers, params=params) as resp:
             if resp.status == 200:
-                result = await resp.json()
-                return result
+                return await resp.json()
             else:
                 raise Exception(f"Ошибка создания загрузки: {resp.status}")
     
@@ -424,7 +442,7 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         data["attachments"] = attachments
     
     logger.info("="*80)
-    logger.info("📤 ОТПРАВКА В MAX")
+    logger.info(f"📤 ОТПРАВКА В MAX")
     logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
     logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
     
