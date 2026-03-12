@@ -77,37 +77,46 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ПРОСТОЕ ФОРМАТИРОВАНИЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННАЯ) ===
 def format_text(text: str, entities: list) -> str:
-    """Применяет форматирование к тексту"""
+    """Применяет форматирование к тексту с учётом смещения"""
     if not entities:
         return text
     
     # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
+    offset_correction = 0
     
     for entity in sorted_entities:
-        start = entity.offset
+        # Корректируем позицию с учётом предыдущих замен
+        start = entity.offset + offset_correction
         end = start + entity.length
         fragment = result[start:end]
         
         if entity.type == "bold":
             replacement = f"**{fragment}**"
+            len_diff = 4
         elif entity.type == "italic":
             replacement = f"*{fragment}*"
+            len_diff = 2
         elif entity.type == "underline":
             replacement = f"++{fragment}++"
+            len_diff = 4
         elif entity.type == "strikethrough":
             replacement = f"~~{fragment}~~"
+            len_diff = 4
         elif entity.type == "text_link":
             replacement = f"[{fragment}]({entity.url})"
+            len_diff = len(fragment) + len(entity.url) + 4
         elif entity.type == "blockquote":
             replacement = f"> {fragment}"
+            len_diff = 2
         else:
             continue
         
         result = result[:start] + replacement + result[end:]
+        offset_correction += len(replacement) - len(fragment)
     
     return result
 
