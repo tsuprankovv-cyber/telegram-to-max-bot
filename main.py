@@ -7,6 +7,7 @@ import mimetypes
 import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.utils.text_decorations import add_surrogates, remove_surrogates
 from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -77,64 +78,89 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (С ГРУППИРОВКОЙ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ===
+def fix_utf16_entities(text: str, entities: list) -> list:
+    """
+    Исправляет UTF-16 смещения в обычные Python индексы
+    """
+    if not entities:
+        return entities
+    
+    # Конвертируем текст в UTF-16 суррогатную пару
+    text_utf16 = add_surrogates(text)
+    
+    fixed_entities = []
+    for entity in sorted(entities, key=lambda e: e.offset):
+        # В UTF-16 пространстве
+        start_utf16 = entity.offset
+        end_utf16 = entity.offset + entity.length
+        fragment_utf16 = text_utf16[start_utf16:end_utf16]
+        
+        # Находим реальные позиции в обычном тексте
+        real_start = len(remove_surrogates(text_utf16[:start_utf16]))
+        real_end = real_start + len(remove_surrogates(fragment_utf16))
+        
+        # Создаём новый entity с правильными позициями
+        new_e = type('Entity', (), {})()
+        new_e.offset = real_start
+        new_e.length = real_end - real_start
+        new_e.type = entity.type
+        if hasattr(entity, 'url'):
+            new_e.url = entity.url
+        
+        fixed_entities.append(new_e)
+        logger.debug(f"🧬 UTF-16 fix: {entity.type} {entity.offset}->{real_start}, len={entity.length}->{new_e.length}")
+    
+    return fixed_entities
+
 def format_text(text: str, entities: list) -> str:
     """
-    Применяет форматирование к тексту, группируя последовательные символы с одинаковыми форматами
+    Форматирует текст с учётом UTF-16 и изменений длины
     """
     if not entities:
         return text
     
-    # Создаём массив для каждого символа с набором форматов
-    formats = [set() for _ in range(len(text))]
+    # Исправляем UTF-16 смещения
+    fixed_entities = fix_utf16_entities(text, entities)
     
-    # Для каждого entity отмечаем каждый символ его типом
-    for entity in entities:
-        fmt_type = entity.type
-        for i in range(entity.offset, entity.offset + entity.length):
-            if i < len(text):
-                formats[i].add(fmt_type)
+    # Сортируем от конца к началу
+    sorted_entities = sorted(fixed_entities, key=lambda e: e.offset, reverse=True)
+    result = text
+    offset_correction = 0
     
-    # Собираем результат, группируя символы с одинаковыми форматами
-    result = []
-    i = 0
-    while i < len(text):
-        # Текущий набор форматов
-        current_formats = formats[i]
+    for entity in sorted_entities:
+        # Корректируем позицию с учётом предыдущих замен
+        start = entity.offset + offset_correction
+        end = start + entity.length
+        fragment = result[start:end]
         
-        # Ищем конец блока с теми же форматами
-        j = i
-        while j < len(text) and formats[j] == current_formats:
-            j += 1
+        # Проверяем, есть ли во фрагменте буквы
+        if not any(c.isalpha() for c in fragment):
+            logger.debug(f"⏭️ Пропускаем {entity.type}: '{fragment}' (нет букв)")
+            continue
         
-        # Берём текст блока
-        block_text = text[i:j]
+        logger.debug(f"🔄 Форматируем {entity.type}: '{fragment}'")
         
-        # Применяем все форматы к блоку
-        for fmt in sorted(current_formats):  # сортируем для стабильности
-            if fmt == "bold":
-                block_text = f"**{block_text}**"
-            elif fmt == "italic":
-                block_text = f"*{block_text}*"
-            elif fmt == "underline":
-                block_text = f"++{block_text}++"
-            elif fmt == "strikethrough":
-                block_text = f"~~{block_text}~~"
-            elif fmt == "blockquote":
-                block_text = f"> {block_text}"
+        if entity.type == "bold":
+            replacement = f"**{fragment}**"
+        elif entity.type == "italic":
+            replacement = f"*{fragment}*"
+        elif entity.type == "underline":
+            replacement = f"++{fragment}++"
+        elif entity.type == "strikethrough":
+            replacement = f"~~{fragment}~~"
+        elif entity.type == "text_link":
+            replacement = f"[{fragment}]({entity.url})"
+        elif entity.type == "blockquote":
+            replacement = f"> {fragment}"
+        else:
+            continue
         
-        # Для ссылок обрабатываем отдельно
-        for entity in entities:
-            if entity.type == "text_link" and entity.offset <= i < entity.offset + entity.length:
-                # Проверяем, что весь блок внутри этой ссылки
-                if j <= entity.offset + entity.length:
-                    block_text = f"[{block_text}]({entity.url})"
-                    break
-        
-        result.append(block_text)
-        i = j
+        result = result[:start] + replacement + result[end:]
+        offset_correction += len(replacement) - len(fragment)
+        logger.debug(f"   → {replacement}")
     
-    return ''.join(result)
+    return result
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -507,7 +533,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (форматирование с группировкой)\n"
+        "• 📝 Текст (UTF-16 форматирование)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
@@ -536,7 +562,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА")
+    logger.info("🚀 ЗАПУСК БОТА (С UTF-16 КОРРЕКЦИЕЙ)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
