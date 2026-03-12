@@ -80,76 +80,52 @@ def safe_filename(filename: str) -> str:
 # === ТЕКСТОВЫЕ ФУНКЦИИ (ФИНАЛЬНАЯ ВЕРСИЯ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст, отделяя эмодзи от форматируемого текста
+    Форматирует текст, проходя от конца к началу с учётом смещения
     """
     if not entities:
         return text
     
-    # Сортируем от начала к концу
-    sorted_entities = sorted(entities, key=lambda e: e.offset)
-    
-    result = []
-    last_pos = 0
+    # Сортируем от конца к началу
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    result = text
+    offset_correction = 0
     
     for entity in sorted_entities:
-        # Добавляем текст до entity
-        if entity.offset > last_pos:
-            result.append(text[last_pos:entity.offset])
+        # Корректируем позицию с учётом предыдущих замен
+        start = entity.offset + offset_correction
+        end = start + entity.length
+        fragment = result[start:end]
         
-        # Берём текст entity
-        fragment = text[entity.offset:entity.offset + entity.length]
+        # Определяем длину добавляемых символов
+        if entity.type == "bold":
+            replacement = f"**{fragment}**"
+            len_diff = 4
+        elif entity.type == "italic":
+            replacement = f"*{fragment}*"
+            len_diff = 2
+        elif entity.type == "underline":
+            replacement = f"++{fragment}++"
+            len_diff = 4
+        elif entity.type == "strikethrough":
+            replacement = f"~~{fragment}~~"
+            len_diff = 4
+        elif entity.type == "text_link":
+            replacement = f"[{fragment}]({entity.url})"
+            len_diff = len(fragment) + len(entity.url) + 4
+        elif entity.type == "blockquote":
+            replacement = f"> {fragment}"
+            len_diff = 2
+        else:
+            continue
         
-        # Разделяем эмодзи и текст
-        text_parts = []
-        emoji_parts = []
-        current_text = ""
+        # Заменяем
+        result = result[:start] + replacement + result[end:]
         
-        for c in fragment:
-            if ord(c) > 0xFFFF:  # эмодзи
-                if current_text:
-                    text_parts.append(current_text)
-                    current_text = ""
-                emoji_parts.append(c)
-            else:
-                current_text += c
-        
-        if current_text:
-            text_parts.append(current_text)
-        
-        # Форматируем только текстовые части
-        formatted_fragment = []
-        
-        # Сначала добавляем эмодзи (они идут в начале)
-        formatted_fragment.extend(emoji_parts)
-        
-        # Затем форматируем текст
-        for text_part in text_parts:
-            if text_part.strip():  # если есть непробельные символы
-                if entity.type == "bold":
-                    formatted_fragment.append(f"**{text_part}**")
-                elif entity.type == "italic":
-                    formatted_fragment.append(f"*{text_part}*")
-                elif entity.type == "underline":
-                    formatted_fragment.append(f"++{text_part}++")
-                elif entity.type == "strikethrough":
-                    formatted_fragment.append(f"~~{text_part}~~")
-                elif entity.type == "text_link":
-                    formatted_fragment.append(f"[{text_part}]({entity.url})")
-                elif entity.type == "blockquote":
-                    formatted_fragment.append(f"> {text_part}")
-                else:
-                    formatted_fragment.append(text_part)
-            else:
-                formatted_fragment.append(text_part)
-        
-        result.append(''.join(formatted_fragment))
-        last_pos = entity.offset + entity.length
+        # Обновляем смещение для следующих entities
+        offset_correction += len(replacement) - len(fragment)
+        logger.debug(f"✅ {entity.type}: {fragment} -> {replacement}, смещение: {offset_correction}")
     
-    # Добавляем остаток текста
-    if last_pos < len(text):
-        result.append(text[last_pos:])
-    
-    return ''.join(result)
+    return result
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -522,7 +498,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (с обработкой эмодзи)\n"
+        "• 📝 Текст (форматирование с учётом смещения)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
