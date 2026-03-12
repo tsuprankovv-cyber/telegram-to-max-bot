@@ -8,7 +8,7 @@ import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# === НАСТРОЙКА ЛОГИРОВАНИЯ ===
+# === НАСТРОЙКА МАКСИМАЛЬНОГО ЛОГИРОВАНИЯ ===
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -37,12 +37,13 @@ telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 class MediaUploader:
-    """Класс для загрузки медиа в MAX"""
+    """Класс для загрузки медиа в MAX с универсальным алгоритмом"""
     
     def __init__(self, token: str):
         self.token = token
         self.base_url = "https://platform-api.max.ru"
         self.session = None
+        self.stats = {"json": 0, "xml": 0, "html": 0, "url": 0, "failed": 0}
     
     async def ensure_session(self):
         if not self.session:
@@ -60,79 +61,106 @@ class MediaUploader:
         async with self.session.post(url, headers=headers, params=params) as resp:
             if resp.status == 200:
                 result = await resp.json()
-                logger.info(f"✅ Получен URL")
+                logger.info(f"✅ Получен URL для загрузки")
                 return result
             else:
                 error = await resp.text()
                 logger.error(f"❌ Ошибка получения URL: {resp.status}")
                 raise Exception(f"Ошибка получения URL: {resp.status}")
     
-    async def upload_file(self, upload_url: str, file_data: bytes, filename: str) -> str:
-        """Загружает файл и возвращает токен"""
+    async def upload_file_universal(self, upload_url: str, file_data: bytes, filename: str, media_type: str) -> dict:
+        """
+        Универсальная загрузка с перебором 4 способов
+        Возвращает словарь с результатом и методом
+        """
         await self.ensure_session()
         
+        # Нормализуем имя файла для разных способов
+        base_name = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1].lower()
+        
+        # Подготавливаем варианты имени файла для разных способов
+        filenames_to_try = [
+            filename,  # оригинал
+            f"{base_name}.mp3",  # для аудио
+            f"{base_name}.mp4",  # для видео
+            f"file{ext}",  # без имени
+            "audio.mp3",  # универсальное имя
+            "video.mp4",
+            "voice.mp3"
+        ]
+        
         # Определяем MIME-тип
-        content_type = mimetypes.guess_type(filename)[0]
-        if not content_type:
-            if filename.endswith('.mp4'):
-                content_type = 'video/mp4'
-            elif filename.endswith(('.mp3', '.m4a')):
-                content_type = 'audio/mpeg'
-            elif filename.endswith('.ogg'):
-                # Пробуем конвертировать в mp3? Нет, просто меняем расширение
-                filename = filename.replace('.ogg', '.mp3')
-                content_type = 'audio/mpeg'
-            elif filename.endswith('.oga'):
-                filename = filename.replace('.oga', '.mp3')
-                content_type = 'audio/mpeg'
-            elif filename.endswith('.pdf'):
-                content_type = 'application/pdf'
-            elif filename.endswith(('.doc', '.docx')):
-                content_type = 'application/msword'
-            elif filename.endswith(('.xls', '.xlsx')):
-                content_type = 'application/vnd.ms-excel'
-            else:
-                content_type = 'application/octet-stream'
+        content_types = []
+        base_type = mimetypes.guess_type(filename)[0]
+        if base_type:
+            content_types.append(base_type)
         
-        logger.info(f"📤 Загрузка файла: {filename} ({content_type})")
+        # Добавляем варианты MIME-типов
+        if media_type == "audio":
+            content_types.extend(['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4'])
+        elif media_type == "video":
+            content_types.extend(['video/mp4', 'video/quicktime', 'video/x-msvideo'])
+        elif media_type == "file":
+            content_types.extend(['application/pdf', 'application/msword', 
+                                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                                 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
+        else:
+            content_types.append('application/octet-stream')
         
-        # Важно: отправляем как multipart/form-data
-        data = aiohttp.FormData()
-        data.add_field('file', file_data, filename=filename, content_type=content_type)
-        
-        async with self.session.post(upload_url, data=data) as resp:
-            # Читаем как текст
-            response_text = await resp.text()
-            logger.info(f"📥 Ответ сервера: {resp.status} - {response_text[:200]}")
-            
-            if resp.status == 200:
-                # Пытаемся распарсить JSON
+        # Пробуем разные комбинации имени файла и MIME-типа
+        for test_filename in filenames_to_try[:3]:  # первые 3 варианта
+            for content_type in content_types[:2]:  # первые 2 варианта MIME
                 try:
-                    result = json.loads(response_text)
-                    token = result.get('token')
-                    if token:
-                        logger.info(f"✅ Файл загружен, токен получен")
-                        return token
-                    else:
-                        logger.error(f"❌ Нет токена в JSON: {result}")
-                        raise Exception("Нет токена в ответе")
-                except json.JSONDecodeError:
-                    # Если не JSON, проверяем XML с <retval>
-                    if '<retval>' in response_text:
-                        # Извлекаем число из <retval>1</retval>
-                        match = re.search(r'<retval>(\d+)</retval>', response_text)
-                        if match:
-                            # Это ID файла, но MAX нужен токен
-                            # Пробуем использовать это как токен?
-                            token = match.group(1)
-                            logger.info(f"⚠️ Получен ID файла: {token}, пробуем использовать как токен")
-                            return token
+                    logger.info(f"🔄 Попытка: {test_filename} ({content_type})")
                     
-                    logger.error(f"❌ Не JSON и не XML: {response_text[:100]}")
-                    raise Exception(f"Неожиданный ответ: {response_text[:100]}")
-            else:
-                logger.error(f"❌ Ошибка загрузки: {resp.status}")
-                raise Exception(f"Ошибка загрузки: {resp.status}")
+                    data = aiohttp.FormData()
+                    data.add_field('file', file_data, filename=test_filename, content_type=content_type)
+                    
+                    async with self.session.post(upload_url, data=data) as resp:
+                        response_text = await resp.text()
+                        logger.info(f"📥 Статус: {resp.status}, Ответ: {response_text[:200]}")
+                        
+                        if resp.status == 200:
+                            # СПОСОБ 1: Пробуем JSON
+                            try:
+                                result = json.loads(response_text)
+                                if result.get('token'):
+                                    logger.info(f"✅ СПОСОБ 1 (JSON) успешен: токен получен")
+                                    self.stats["json"] += 1
+                                    return {"token": result['token'], "method": "json", "status": "success"}
+                            except:
+                                pass
+                            
+                            # СПОСОБ 2: Пробуем XML <retval>
+                            xml_match = re.search(r'<retval>(\d+)</retval>', response_text)
+                            if xml_match:
+                                token = xml_match.group(1)
+                                logger.info(f"✅ СПОСОБ 2 (XML) успешен: токен {token}")
+                                self.stats["xml"] += 1
+                                return {"token": token, "method": "xml", "status": "success"}
+                            
+                            # СПОСОБ 3: Пробуем найти любой токен в HTML
+                            html_token = re.search(r'token[=:]["\']?([a-zA-Z0-9_\-]+)["\']?', response_text)
+                            if html_token:
+                                token = html_token.group(1)
+                                logger.info(f"✅ СПОСОБ 3 (HTML) успешен: токен {token[:20]}...")
+                                self.stats["html"] += 1
+                                return {"token": token, "method": "html", "status": "success"}
+                            
+                            # Если ничего не нашли, но статус 200
+                            logger.info(f"⚠️ Статус 200, но токен не найден, сохраняем как есть")
+                            self.stats["failed"] += 1
+                            return {"token": response_text.strip(), "method": "raw", "status": "unknown"}
+                            
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка попытки: {e}")
+                    continue
+        
+        # СПОСОБ 4: Если всё плохо, возвращаем None (будет использована прямая ссылка)
+        logger.warning(f"⚠️ Все способы загрузки не удались")
+        self.stats["url"] += 1
+        return {"token": None, "method": "url", "status": "failed"}
 
 class TelegramDownloader:
     """Класс для скачивания файлов из Telegram"""
@@ -302,13 +330,13 @@ def process_text_part(text: str, entities: list) -> str:
     return format_text_with_entities(text, entities)
 
 async def process_media_message(message: types.Message) -> tuple[str, list]:
-    """Обрабатывает медиа-сообщение"""
+    """Обрабатывает медиа-сообщение с универсальным алгоритмом"""
     attachments = []
     text = message.caption or ""
     
     try:
         if message.photo:
-            # Фото - через URL (работает)
+            # Фото - всегда через URL (работает стабильно)
             photo = message.photo[-1]
             logger.info(f"🖼️ Фото: {photo.width}x{photo.height}")
             
@@ -320,76 +348,81 @@ async def process_media_message(message: types.Message) -> tuple[str, list]:
                 "payload": {"url": photo_url}
             })
             
-        elif message.video:
-            # Видео - через загрузку
-            logger.info(f"🎥 Видео: {message.video.file_name or 'без названия'}")
+        elif any([message.video, message.audio, message.voice, message.document]):
+            # Определяем тип медиа
+            if message.video:
+                media_type = "video"
+                file_id = message.video.file_id
+                file_name = message.video.file_name or "video.mp4"
+                logger.info(f"🎥 Видео: {file_name}")
+            elif message.audio:
+                media_type = "audio"
+                file_id = message.audio.file_id
+                file_name = message.audio.file_name or "audio.mp3"
+                logger.info(f"🎵 Аудио: {file_name}")
+            elif message.voice:
+                media_type = "audio"
+                file_id = message.voice.file_id
+                file_name = "voice.mp3"  # принудительно mp3
+                logger.info(f"🎤 Голосовое (как mp3)")
+            elif message.document:
+                # Для документов определяем тип по расширению
+                file_name = message.document.file_name
+                file_id = message.document.file_id
+                
+                if file_name.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                    media_type = "image"
+                elif file_name.endswith(('.mp4', '.mov', '.avi')):
+                    media_type = "video"
+                elif file_name.endswith(('.mp3', '.ogg', '.wav')):
+                    media_type = "audio"
+                else:
+                    media_type = "file"
+                
+                logger.info(f"📄 Документ: {file_name} (как {media_type})")
             
-            file_data, filename = await tg_downloader.download_file(message.video.file_id)
-            upload_info = await media_uploader.get_upload_url("video")
-            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
+            # Скачиваем файл
+            file_data, original_filename = await tg_downloader.download_file(file_id)
             
-            attachments.append({
-                "type": "video",
-                "payload": {"token": token}
-            })
+            # Получаем URL для загрузки
+            upload_info = await media_uploader.get_upload_url(media_type)
             
-        elif message.audio:
-            # Аудио - через загрузку
-            logger.info(f"🎵 Аудио: {message.audio.file_name}")
+            # Универсальная загрузка с перебором способов
+            result = await media_uploader.upload_file_universal(
+                upload_info['url'], 
+                file_data, 
+                file_name, 
+                media_type
+            )
             
-            file_data, filename = await tg_downloader.download_file(message.audio.file_id)
-            upload_info = await media_uploader.get_upload_url("audio")
-            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
-            
-            attachments.append({
-                "type": "audio",
-                "payload": {"token": token}
-            })
-            
-        elif message.voice:
-            # Голосовое - конвертируем в mp3
-            logger.info(f"🎤 Голосовое (конвертация в mp3)")
-            
-            file_data, filename = await tg_downloader.download_file(message.voice.file_id)
-            # Меняем расширение на .mp3
-            filename = 'voice.mp3'
-            
-            upload_info = await media_uploader.get_upload_url("audio")
-            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
-            
-            attachments.append({
-                "type": "audio",
-                "payload": {"token": token}
-            })
-            
-        elif message.document:
-            # Документ
-            logger.info(f"📄 Документ: {message.document.file_name}")
-            
-            file_data, filename = await tg_downloader.download_file(message.document.file_id)
-            
-            # Определяем тип документа
-            doc_type = "file"
-            if filename.endswith('.pdf'):
-                doc_type = "file"
-            elif filename.endswith(('.doc', '.docx')):
-                doc_type = "file"
-            elif filename.endswith(('.xls', '.xlsx')):
-                doc_type = "file"
-            elif filename.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                doc_type = "image"
-            elif filename.endswith(('.mp4', '.mov', '.avi')):
-                doc_type = "video"
-            elif filename.endswith(('.mp3', '.m4a')):
-                doc_type = "audio"
-            
-            upload_info = await media_uploader.get_upload_url(doc_type)
-            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
-            
-            attachments.append({
-                "type": doc_type,
-                "payload": {"token": token} if doc_type != "file" else {"token": token, "name": filename}
-            })
+            # Формируем attachment
+            if result["token"]:
+                # Успешно получили токен
+                if media_type == "file":
+                    attachments.append({
+                        "type": media_type,
+                        "payload": {
+                            "token": result["token"],
+                            "name": file_name
+                        }
+                    })
+                else:
+                    attachments.append({
+                        "type": media_type,
+                        "payload": {"token": result["token"]}
+                    })
+                logger.info(f"✅ Загружено способом {result['method']}")
+            else:
+                # Если не получили токен, пробуем прямую ссылку
+                logger.warning(f"⚠️ Не удалось получить токен, пробуем прямую ссылку")
+                file_info = await tg_downloader.get_file_info(file_id)
+                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
+                
+                attachments.append({
+                    "type": media_type if media_type != "file" else "file",
+                    "payload": {"url": file_url} if media_type != "file" else {"url": file_url, "name": file_name}
+                })
+                logger.info(f"✅ Отправляем прямой ссылкой")
     
     except Exception as e:
         logger.error(f"❌ Ошибка обработки медиа: {e}")
@@ -425,7 +458,8 @@ async def send_to_max(text: str, attachments: list = None):
     logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
     if attachments:
         for i, att in enumerate(attachments):
-            logger.info(f"   {i+1}. {att['type']}: {att['payload']}")
+            payload_preview = str(att['payload'])[:100]
+            logger.info(f"   {i+1}. {att['type']}: {payload_preview}")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -474,18 +508,29 @@ async def forward(message: types.Message):
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    stats = media_uploader.stats
     await message.answer(
         "✅ БОТ-ПЕРЕСЫЛЬЩИК MAX\n\n"
-        "📋 **Этап 6: Медиафайлы (финал)**\n\n"
-        "Поддерживается:\n"
-        "• ✅ Фото (прямые ссылки)\n"
-        "• 🎥 Видео (токены)\n"
-        "• 🎵 Аудио (токены)\n"
-        "• 🎤 Голосовые (конвертация в mp3)\n"
-        "• 📄 PDF, DOC, DOCX, XLS, XLSX\n"
-        "• Все форматы текста\n"
-        "• Заголовки\n\n"
+        "📋 **Универсальный алгоритм загрузки**\n\n"
+        f"📊 **Статистика способов:**\n"
+        f"• JSON: {stats['json']}\n"
+        f"• XML: {stats['xml']}\n"
+        f"• HTML: {stats['html']}\n"
+        f"• Прямые ссылки: {stats['url']}\n"
+        f"• Ошибки: {stats['failed']}\n\n"
         "Отправьте любой файл в группу!"
+    )
+
+@dp.message(Command("stats"))
+async def show_stats(message: types.Message):
+    stats = media_uploader.stats
+    await message.answer(
+        f"📊 **СТАТИСТИКА ЗАГРУЗОК:**\n\n"
+        f"✅ JSON (способ 1): {stats['json']}\n"
+        f"✅ XML (способ 2): {stats['xml']}\n"
+        f"✅ HTML (способ 3): {stats['html']}\n"
+        f"✅ Прямые ссылки (способ 4): {stats['url']}\n"
+        f"❌ Ошибки: {stats['failed']}"
     )
 
 async def cleanup():
@@ -494,9 +539,10 @@ async def cleanup():
         await tg_downloader.session.close()
     if media_uploader.session:
         await media_uploader.session.close()
+    logger.info(f"📊 Итоговая статистика: {media_uploader.stats}")
 
 async def main():
-    logger.info("🚀 ЗАПУСК ЭТАПА 6: МЕДИАФАЙЛЫ (финал)")
+    logger.info("🚀 ЗАПУСК С УНИВЕРСАЛЬНЫМ АЛГОРИТМОМ")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
