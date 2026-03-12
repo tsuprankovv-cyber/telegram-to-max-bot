@@ -77,47 +77,62 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ПОСИМВОЛЬНОЕ ФОРМАТИРОВАНИЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (С ГРУППИРОВКОЙ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Применяет форматирование к каждому символу индивидуально
+    Применяет форматирование к тексту, группируя последовательные символы с одинаковыми форматами
     """
     if not entities:
         return text
     
     # Создаём массив для каждого символа с набором форматов
-    formats = [[] for _ in range(len(text))]
+    formats = [set() for _ in range(len(text))]
     
     # Для каждого entity отмечаем каждый символ его типом
     for entity in entities:
         fmt_type = entity.type
         for i in range(entity.offset, entity.offset + entity.length):
             if i < len(text):
-                formats[i].append(fmt_type)
+                formats[i].add(fmt_type)
     
-    # Собираем результат
+    # Собираем результат, группируя символы с одинаковыми форматами
     result = []
-    for i, char in enumerate(text):
-        formatted_char = char
-        # Применяем все форматы к символу
-        for fmt in formats[i]:
+    i = 0
+    while i < len(text):
+        # Текущий набор форматов
+        current_formats = formats[i]
+        
+        # Ищем конец блока с теми же форматами
+        j = i
+        while j < len(text) and formats[j] == current_formats:
+            j += 1
+        
+        # Берём текст блока
+        block_text = text[i:j]
+        
+        # Применяем все форматы к блоку
+        for fmt in sorted(current_formats):  # сортируем для стабильности
             if fmt == "bold":
-                formatted_char = f"**{formatted_char}**"
+                block_text = f"**{block_text}**"
             elif fmt == "italic":
-                formatted_char = f"*{formatted_char}*"
+                block_text = f"*{block_text}*"
             elif fmt == "underline":
-                formatted_char = f"++{formatted_char}++"
+                block_text = f"++{block_text}++"
             elif fmt == "strikethrough":
-                formatted_char = f"~~{formatted_char}~~"
-            elif fmt == "text_link":
-                # Для ссылок нужно найти правильный URL
-                for entity in entities:
-                    if entity.type == "text_link" and entity.offset <= i < entity.offset + entity.length:
-                        formatted_char = f"[{formatted_char}]({entity.url})"
-                        break
+                block_text = f"~~{block_text}~~"
             elif fmt == "blockquote":
-                formatted_char = f">{formatted_char}"
-        result.append(formatted_char)
+                block_text = f"> {block_text}"
+        
+        # Для ссылок обрабатываем отдельно
+        for entity in entities:
+            if entity.type == "text_link" and entity.offset <= i < entity.offset + entity.length:
+                # Проверяем, что весь блок внутри этой ссылки
+                if j <= entity.offset + entity.length:
+                    block_text = f"[{block_text}]({entity.url})"
+                    break
+        
+        result.append(block_text)
+        i = j
     
     return ''.join(result)
 
@@ -492,7 +507,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (посимвольное форматирование)\n"
+        "• 📝 Текст (форматирование с группировкой)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
