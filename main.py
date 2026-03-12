@@ -35,8 +35,8 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-class FileUploader:
-    """Упрощенный загрузчик с разделением по типам"""
+class DocumentUploader:
+    """Загрузчик только для документов (PDF, DOC, XLS)"""
     
     def __init__(self, token: str):
         self.token = token
@@ -47,12 +47,12 @@ class FileUploader:
         if not self.session:
             self.session = aiohttp.ClientSession()
     
-    async def get_upload_url(self, media_type: str) -> str:
-        """Получает URL для загрузки файла"""
+    async def get_upload_url(self) -> str:
+        """Получает URL для загрузки документа"""
         await self.ensure_session()
         url = f"{self.base_url}/uploads"
         headers = {"Authorization": self.token}
-        params = {"type": media_type}
+        params = {"type": "file"}
         
         async with self.session.post(url, headers=headers, params=params) as resp:
             if resp.status == 200:
@@ -61,8 +61,8 @@ class FileUploader:
             else:
                 raise Exception(f"Ошибка получения URL: {resp.status}")
     
-    async def upload_file(self, upload_url: str, file_data: bytes, filename: str) -> str:
-        """Загружает файл и возвращает токен (только для поддерживаемых типов)"""
+    async def upload_document(self, upload_url: str, file_data: bytes, filename: str) -> str:
+        """Загружает документ и возвращает токен"""
         await self.ensure_session()
         
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
@@ -71,18 +71,11 @@ class FileUploader:
         data.add_field('file', file_data, filename=filename, content_type=content_type)
         
         async with self.session.post(upload_url, data=data) as resp:
-            response_text = await resp.text()
-            
             if resp.status == 200:
-                try:
-                    result = json.loads(response_text)
-                    if result.get('token'):
-                        return result['token']
-                except:
-                    pass
-            
-            # Если не получили токен, возвращаем None
-            return None
+                result = await resp.json()
+                return result.get('token')
+            else:
+                return None
 
 class TelegramDownloader:
     """Класс для получения информации о файлах"""
@@ -109,9 +102,15 @@ class TelegramDownloader:
                 return f"{self.file_url}/{file_path}"
             else:
                 raise Exception(f"Ошибка получения информации: {resp.status}")
+    
+    async def download_file(self, file_id: str) -> bytes:
+        """Скачивает файл для последующей загрузки"""
+        file_url = await self.get_file_url(file_id)
+        async with self.session.get(file_url) as resp:
+            return await resp.read()
 
 # Инициализируем
-uploader = FileUploader(MAX_TOKEN)
+doc_uploader = DocumentUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
 
 def format_text_with_entities(text: str, entities: list) -> str:
@@ -232,13 +231,13 @@ def process_text_part(text: str, entities: list) -> str:
     return format_text_with_entities(text, entities)
 
 async def process_media_message(message: types.Message) -> tuple[str, list]:
-    """Обрабатывает медиа-сообщение с разделением по типам"""
+    """Обрабатывает медиа-сообщение"""
     attachments = []
     text = message.caption or ""
     
     try:
         if message.photo:
-            # Фото - прямая ссылка (всегда работает)
+            # Фото - всегда прямая ссылка
             file_url = await downloader.get_file_url(message.photo[-1].file_id)
             attachments.append({
                 "type": "image",
@@ -250,13 +249,12 @@ async def process_media_message(message: types.Message) -> tuple[str, list]:
             file_name = message.document.file_name
             file_url = await downloader.get_file_url(message.document.file_id)
             
-            # Документы, которые точно работают через токены
+            # Документы (PDF, DOC, XLS) - через токены
             if file_name.endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx')):
                 try:
-                    # Пробуем получить токен
-                    upload_url = await uploader.get_upload_url("file")
-                    file_data = await (await aiohttp.ClientSession().get(file_url)).read()
-                    token = await uploader.upload_file(upload_url, file_data, file_name)
+                    file_data = await downloader.download_file(message.document.file_id)
+                    upload_url = await doc_uploader.get_upload_url()
+                    token = await doc_uploader.upload_document(upload_url, file_data, file_name)
                     
                     if token:
                         attachments.append({
@@ -269,56 +267,33 @@ async def process_media_message(message: types.Message) -> tuple[str, list]:
                             "type": "file",
                             "payload": {"url": file_url, "name": file_name}
                         })
-                        logger.info(f"📄 {file_name} (прямая ссылка)")
-                except:
+                        logger.info(f"📄 {file_name} (прямая ссылка - токен не получен)")
+                except Exception as e:
                     attachments.append({
                         "type": "file",
                         "payload": {"url": file_url, "name": file_name}
                     })
-                    logger.info(f"📄 {file_name} (прямая ссылка - fallback)")
+                    logger.info(f"📄 {file_name} (прямая ссылка - ошибка: {e})")
             
-            # Видео/аудио файлы как документы - только прямая ссылка
-            elif file_name.endswith(('.mp4', '.mov', '.avi', '.mp3', '.ogg', '.wav')):
-                attachments.append({
-                    "type": "file",
-                    "payload": {"url": file_url, "name": file_name}
-                })
-                logger.info(f"🎬 {file_name} (прямая ссылка)")
-            
-            # Остальные документы - прямая ссылка
+            # Видео/аудио как документы - игнорируем (будут обработаны ниже)
             else:
-                attachments.append({
-                    "type": "file",
-                    "payload": {"url": file_url, "name": file_name}
-                })
-                logger.info(f"📄 {file_name} (прямая ссылка)")
+                # Не обрабатываем здесь, пропускаем
+                pass
         
         elif message.video:
-            # Видео - только прямая ссылка (токены не работают)
-            file_url = await downloader.get_file_url(message.video.file_id)
-            attachments.append({
-                "type": "video",
-                "payload": {"url": file_url}
-            })
-            logger.info("🎥 Видео (прямая ссылка)")
+            # Видео - игнорируем (не поддерживается)
+            logger.warning("🎥 Видео не поддерживается, пропускаем")
+            return text, []
             
         elif message.audio:
-            # Аудио - только прямая ссылка
-            file_url = await downloader.get_file_url(message.audio.file_id)
-            attachments.append({
-                "type": "audio",
-                "payload": {"url": file_url}
-            })
-            logger.info("🎵 Аудио (прямая ссылка)")
+            # Аудио - игнорируем
+            logger.warning("🎵 Аудио не поддерживается, пропускаем")
+            return text, []
             
         elif message.voice:
-            # Голосовое - только прямая ссылка
-            file_url = await downloader.get_file_url(message.voice.file_id)
-            attachments.append({
-                "type": "audio",
-                "payload": {"url": file_url}
-            })
-            logger.info("🎤 Голосовое (прямая ссылка)")
+            # Голосовое - игнорируем
+            logger.warning("🎤 Голосовое не поддерживается, пропускаем")
+            return text, []
     
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
@@ -327,21 +302,23 @@ async def process_media_message(message: types.Message) -> tuple[str, list]:
 
 async def send_to_max(text: str, attachments: list = None):
     """Отправляет сообщение в MAX"""
+    if not attachments:
+        return False
+    
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
         "Authorization": MAX_TOKEN,
         "Content-Type": "application/json"
     }
     
-    if not text and not attachments:
-        return False
-    
-    data = {"text": text or " ", "format": "markdown"}
-    if attachments:
-        data["attachments"] = attachments
+    data = {
+        "text": text or " ",
+        "format": "markdown",
+        "attachments": attachments
+    }
     
     logger.info("="*70)
-    logger.info(f"📤 Отправка: {len(attachments) if attachments else 0} вложений")
+    logger.info(f"📤 Отправка: {len(attachments)} вложений")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -366,6 +343,9 @@ async def forward(message: types.Message):
     
     text, attachments = await process_media_message(message)
     
+    if not attachments:
+        return
+    
     if message.caption:
         text_entities = message.caption_entities
     else:
@@ -383,13 +363,13 @@ async def forward(message: types.Message):
 async def start(message: types.Message):
     await message.answer(
         "✅ **ФИНАЛЬНАЯ ВЕРСИЯ**\n\n"
-        "📋 **Что работает:**\n"
-        "• ✅ Фото (всегда)\n"
-        "• ✅ PDF, DOC, XLS (токены)\n"
-        "• ✅ Видео/Аудио (прямые ссылки)\n"
-        "• ✅ Голосовые (прямые ссылки)\n"
-        "• ✅ Текст, заголовки, эмодзи\n\n"
-        "Все файлы будут доставлены!"
+        "📋 **Поддерживается:**\n"
+        "• ✅ Фото\n"
+        "• ✅ PDF, DOC, XLS (с токенами)\n"
+        "• ❌ Видео (не поддерживается MAX)\n"
+        "• ❌ Аудио (не поддерживается MAX)\n"
+        "• ❌ Голосовые (не поддерживаются MAX)\n\n"
+        "Отправляйте документы - они работают!"
     )
 
 async def main():
