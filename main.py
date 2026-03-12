@@ -83,7 +83,7 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (РАБОЧАЯ ВЕРСИЯ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
 def format_text_with_entities(text: str, entities: list) -> str:
     """Применяет форматирование к тексту"""
     if not entities:
@@ -117,32 +117,65 @@ def format_text_with_entities(text: str, entities: list) -> str:
     return result
 
 def is_heading(text: str, entities: list) -> bool:
-    """Проверяет, является ли начало заголовком"""
-    if not entities:
+    """
+    Проверяет, является ли начало текста заголовком
+    """
+    if not entities or not text:
         return False
     
+    # Сортируем по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
-    first = sorted_entities[0]
     
-    if first.offset != 0 or first.type != "bold":
+    # Проверяем, что первый элемент начинается с 0 И это жирный
+    first_entity = sorted_entities[0]
+    
+    # Если первый элемент не с 0 позиции - перед ним есть обычный текст
+    if first_entity.offset != 0:
+        logger.debug(f"📝 Не заголовок: первый элемент не в начале (offset={first_entity.offset})")
         return False
     
+    # Если первый элемент не жирный
+    if first_entity.type != "bold":
+        logger.debug(f"📝 Не заголовок: первый элемент не жирный ({first_entity.type})")
+        return False
+    
+    # Собираем все жирные подряд с начала
     last_pos = 0
     last_bold_end = 0
+    bold_count = 0
     
     for e in sorted_entities:
+        # Если позиция не совпадает с ожидаемой - прерываем
         if e.offset != last_pos:
-            break
+            logger.debug(f"📝 Не заголовок: разрыв на позиции {e.offset}")
+            return False
+        
+        # Если тип не жирный - прерываем
         if e.type != "bold":
-            break
+            logger.debug(f"📝 Не заголовок: не жирный тип на позиции {e.offset}")
+            return False
+        
         last_bold_end = e.offset + e.length
         last_pos = last_bold_end
+        bold_count += 1
     
-    if last_bold_end == 0:
+    # Проверяем, есть ли обычный текст после жирных фрагментов
+    text_after = text[last_bold_end:].lstrip()
+    
+    if not text_after:
+        logger.debug(f"📝 Не заголовок: нет текста после жирного")
         return False
     
-    text_after = text[last_bold_end:].lstrip()
-    return bool(text_after)
+    # Проверяем, что в тексте после есть что-то кроме пробелов
+    if len(text_after.strip()) == 0:
+        logger.debug(f"📝 Не заголовок: после жирного только пробелы")
+        return False
+    
+    logger.info(f"✅ Это заголовок: первые {bold_count} элементов жирные подряд")
+    logger.debug(f"   Заголовок: '{text[:50]}...'")
+    logger.debug(f"   Остальной текст: '{text_after[:50]}...'")
+    
+    return True
 
 def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
     """Извлекает заголовок"""
