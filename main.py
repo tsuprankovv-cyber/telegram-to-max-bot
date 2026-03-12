@@ -39,7 +39,7 @@ dp = Dispatcher()
 
 class DocumentUploader:
     """
-    Загрузчик для документов (PDF, DOC, XLS) - РАБОЧАЯ ВЕРСИЯ ИЗ ИСТОРИИ
+    Загрузчик для всех типов файлов
     """
     
     def __init__(self, token: str):
@@ -47,14 +47,10 @@ class DocumentUploader:
         self.base_url = "https://platform-api.max.ru"
         self.session = None
         self.stats = {
-            "documents_ok": 0,
-            "documents_failed": 0,
-            "video_ok": 0,
-            "video_failed": 0,
-            "audio_ok": 0,
-            "audio_failed": 0,
-            "voice_ok": 0,
-            "voice_failed": 0,
+            "documents_ok": 0, "documents_failed": 0,
+            "video_ok": 0, "video_failed": 0,
+            "audio_ok": 0, "audio_failed": 0,
+            "voice_ok": 0, "voice_failed": 0,
             "photo_ok": 0
         }
     
@@ -64,9 +60,7 @@ class DocumentUploader:
             logger.debug("🔌 Сессия создана")
     
     async def create_upload(self, media_type: str) -> dict:
-        """
-        ПОЛУЧЕНИЕ URL И ТОКЕНА ДЛЯ ЗАГРУЗКИ
-        """
+        """Создание загрузки"""
         await self.ensure_session()
         url = f"{self.base_url}/uploads"
         headers = {"Authorization": self.token}
@@ -92,9 +86,7 @@ class DocumentUploader:
                 raise Exception(f"Ошибка создания загрузки: {resp.status}")
     
     async def upload_file(self, upload_url: str, file_data: bytes, filename: str) -> bool:
-        """
-        ЗАГРУЗКА ФАЙЛА НА СЕРВЕР
-        """
+        """Загрузка файла"""
         await self.ensure_session()
         
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
@@ -120,9 +112,7 @@ class DocumentUploader:
                 return False
     
     async def upload_document(self, file_data: bytes, filename: str) -> Optional[str]:
-        """
-        ЗАГРУЗКА ДОКУМЕНТА (PDF, DOC, XLS)
-        """
+        """Загрузка документа"""
         try:
             logger.info(f"📄 [ДОКУМЕНТ] Начало загрузки: {filename}")
             
@@ -137,7 +127,7 @@ class DocumentUploader:
             
             if await self.upload_file(upload_url, file_data, filename):
                 self.stats["documents_ok"] += 1
-                logger.info(f"✅ [ДОКУМЕНТ] {filename} готов, токен: {token[:20]}...")
+                logger.info(f"✅ [ДОКУМЕНТ] {filename} готов")
                 return token
             else:
                 self.stats["documents_failed"] += 1
@@ -149,9 +139,7 @@ class DocumentUploader:
             return None
     
     async def upload_video(self, file_data: bytes, filename: str) -> Optional[str]:
-        """
-        ЗАГРУЗКА ВИДЕО (с паузой для обработки)
-        """
+        """Загрузка видео"""
         try:
             logger.info(f"🎥 [ВИДЕО] Начало загрузки: {filename}")
             
@@ -180,13 +168,12 @@ class DocumentUploader:
             return None
     
     async def upload_audio(self, file_data: bytes, filename: str) -> Optional[str]:
-        """
-        ЗАГРУЗКА АУДИО (как файл, не голосовое)
-        """
+        """Загрузка аудио (пробуем как file, не как audio)"""
         try:
             logger.info(f"🎵 [АУДИО] Начало загрузки: {filename}")
             
-            upload_info = await self.create_upload("audio")
+            # Пробуем загрузить как file, а не как audio
+            upload_info = await self.create_upload("file")  # ВАЖНО: используем file вместо audio
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
             
@@ -196,10 +183,8 @@ class DocumentUploader:
                 return None
             
             if await self.upload_file(upload_url, file_data, filename):
-                logger.info(f"⏳ [АУДИО] Ожидание обработки (2 сек)...")
-                await asyncio.sleep(2)
                 self.stats["audio_ok"] += 1
-                logger.info(f"✅ [АУДИО] {filename} готов")
+                logger.info(f"✅ [АУДИО] {filename} готов как файл")
                 return token
             else:
                 self.stats["audio_failed"] += 1
@@ -211,9 +196,7 @@ class DocumentUploader:
             return None
     
     async def upload_voice(self, file_data: bytes, filename: str) -> Optional[str]:
-        """
-        ЗАГРУЗКА ГОЛОСОВОГО (специальный формат)
-        """
+        """Загрузка голосового"""
         try:
             logger.info(f"🎤 [ГОЛОСОВОЕ] Начало загрузки")
             
@@ -226,7 +209,6 @@ class DocumentUploader:
                 self.stats["voice_failed"] += 1
                 return None
             
-            # Для голосовых используем .ogg как в оригинале
             if await self.upload_file(upload_url, file_data, filename):
                 logger.info(f"⏳ [ГОЛОСОВОЕ] Ожидание обработки (2 сек)...")
                 await asyncio.sleep(2)
@@ -416,7 +398,7 @@ def process_text_part(text: str, entities: list) -> str:
 
 async def process_media_message(message: types.Message) -> Tuple[str, List[dict]]:
     """
-    ОБРАБОТКА СООБЩЕНИЯ С ПОДДЕРЖКОЙ ПАКЕТНОЙ ОТПРАВКИ
+    ОБРАБОТКА СООБЩЕНИЯ
     """
     attachments = []
     text = message.caption or ""
@@ -436,7 +418,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                 "payload": {"url": photo_url}
             })
             uploader.stats["photo_ok"] += 1
-            logger.info(f"✅ [ФОТО] Готово: {photo_url[:100]}...")
+            logger.info(f"✅ [ФОТО] Готово")
         
         # ВИДЕО
         elif message.video:
@@ -449,18 +431,19 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token}
                 })
         
-        # АУДИО (как файл)
+        # АУДИО - пробуем как file, а не как audio
         elif message.audio:
             logger.info("🎵 [АУДИО] Обработка")
             file_data, filename = await downloader.download_file(message.audio.file_id)
-            token = await uploader.upload_audio(file_data, filename)
+            token = await uploader.upload_audio(file_data, filename)  # upload_audio теперь использует file
             if token:
                 attachments.append({
-                    "type": "audio",
-                    "payload": {"token": token}
+                    "type": "file",  # ВАЖНО: отправляем как file, а не audio
+                    "payload": {"token": token, "name": filename}
                 })
+                logger.info(f"✅ [АУДИО] {filename} готов как файл")
         
-        # ГОЛОСОВЫЕ (специальный формат)
+        # ГОЛОСОВЫЕ - оставляем как есть
         elif message.voice:
             logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
             file_data, filename = await downloader.download_file(message.voice.file_id)
@@ -471,7 +454,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token}
                 })
         
-        # ДОКУМЕНТЫ (PDF, DOC, XLS) - РАБОЧАЯ ВЕРСИЯ
+        # ДОКУМЕНТЫ - ТЕПЕРЬ ТОЧНО ДОЛЖНЫ РАБОТАТЬ
         elif message.document:
             file_name = message.document.file_name
             logger.info(f"📄 [ДОКУМЕНТ] Обработка: {file_name}")
@@ -481,7 +464,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             # Определяем тип по расширению
             ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
             
-            # Документы - через file тип
+            # Документы (PDF, DOC, XLS)
             document_ext = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'rtf', 'odt', 'ods']
             
             if ext in document_ext:
@@ -514,12 +497,12 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     })
             
             elif ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
-                logger.info(f"   Тип: аудио")
+                logger.info(f"   Тип: аудио (как файл)")
                 token = await uploader.upload_audio(file_data, file_name)
                 if token:
                     attachments.append({
-                        "type": "audio",
-                        "payload": {"token": token}
+                        "type": "file",
+                        "payload": {"token": token, "name": file_name}
                     })
             
             else:
