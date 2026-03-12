@@ -7,6 +7,7 @@ import mimetypes
 import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.utils.text_decorations import add_surrogates, remove_surrogates
 from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -77,34 +78,77 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (УПРОЩЁННЫЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ===
+def fix_utf16_entities(text: str, entities: list) -> list:
+    """
+    Исправляет UTF-16 смещения для правильного форматирования
+    """
+    if not entities:
+        return entities
+    
+    # Конвертируем в UTF-16
+    text_utf16 = add_surrogates(text)
+    fixed_entities = []
+    
+    for entity in sorted(entities, key=lambda e: e.offset):
+        # Получаем позиции в UTF-16
+        start_utf16 = entity.offset
+        end_utf16 = entity.offset + entity.length
+        
+        # Получаем текст до entity и сам entity в UTF-16
+        prefix_utf16 = text_utf16[:start_utf16]
+        fragment_utf16 = text_utf16[start_utf16:end_utf16]
+        
+        # Конвертируем обратно в обычный текст для подсчёта реальных позиций
+        real_start = len(remove_surrogates(prefix_utf16))
+        real_length = len(remove_surrogates(fragment_utf16))
+        
+        # Создаём новый entity с правильными позициями
+        new_e = type('Entity', (), {})()
+        new_e.offset = real_start
+        new_e.length = real_length
+        new_e.type = entity.type
+        if hasattr(entity, 'url'):
+            new_e.url = entity.url
+        
+        fixed_entities.append(new_e)
+        logger.debug(f"🧬 UTF-16: {entity.offset}->{real_start}, {entity.length}->{real_length}")
+    
+    return fixed_entities
+
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст с учётом изменений длины
+    Форматирует текст с правильным учётом UTF-16
     """
     if not entities:
         return text
     
+    # Исправляем UTF-16 смещения
+    fixed_entities = fix_utf16_entities(text, entities)
+    
     # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    sorted_entities = sorted(fixed_entities, key=lambda e: e.offset, reverse=True)
     result = text
     offset_correction = 0
     
     for entity in sorted_entities:
-        # Корректируем позицию с учётом предыдущих замен
+        # Корректируем позицию
         start = entity.offset + offset_correction
         end = start + entity.length
         fragment = result[start:end]
         
-        # Проверяем, есть ли во фрагменте буквы
-        if not any(c.isalpha() for c in fragment):
-            logger.debug(f"⏭️ Пропускаем {entity.type}: '{fragment}' (нет букв)")
-            continue
-        
-        logger.debug(f"🔄 Форматируем {entity.type}: '{fragment}'")
-        
+        # Определяем тип форматирования
         if entity.type == "bold":
-            replacement = f"**{fragment}**"
+            # Убираем пробелы между звёздочками и текстом
+            fragment_clean = fragment.strip()
+            if fragment.startswith(' ') or fragment.endswith(' '):
+                # Сохраняем пробелы отдельно
+                prefix = fragment[:len(fragment)-len(fragment.lstrip())]
+                suffix = fragment[len(fragment.rstrip()):]
+                core = fragment.strip()
+                replacement = f"{prefix}**{core}**{suffix}"
+            else:
+                replacement = f"**{fragment}**"
         elif entity.type == "italic":
             replacement = f"*{fragment}*"
         elif entity.type == "underline":
@@ -118,13 +162,14 @@ def format_text(text: str, entities: list) -> str:
         else:
             continue
         
+        # Заменяем
         result = result[:start] + replacement + result[end:]
         offset_correction += len(replacement) - len(fragment)
-        logger.debug(f"   → {replacement}")
+        logger.debug(f"✅ {entity.type}: {fragment} -> {replacement}")
     
     return result
 
-# === МЕДИА КЛАССЫ ===
+# === МЕДИА КЛАССЫ (без изменений) ===
 class MediaUploader:
     def __init__(self, token: str):
         self.token = token
@@ -495,7 +540,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (простое форматирование)\n"
+        "• 📝 Текст (UTF-16 коррекция)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
