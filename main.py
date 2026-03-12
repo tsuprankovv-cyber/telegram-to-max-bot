@@ -80,8 +80,7 @@ def safe_filename(filename: str) -> str:
 # === ТЕКСТОВЫЕ ФУНКЦИИ (ФИНАЛЬНАЯ ВЕРСИЯ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст, проходя по entities от начала к концу
-    Эмодзи и спецсимволы игнорируются при форматировании
+    Форматирует текст, отделяя эмодзи от форматируемого текста
     """
     if not entities:
         return text
@@ -100,32 +99,50 @@ def format_text(text: str, entities: list) -> str:
         # Берём текст entity
         fragment = text[entity.offset:entity.offset + entity.length]
         
-        # Проверяем, есть ли в фрагменте буквы (кириллица или латиница)
-        has_letters = any(c.isalpha() for c in fragment)
+        # Разделяем эмодзи и текст
+        text_parts = []
+        emoji_parts = []
+        current_text = ""
         
-        # Проверяем, есть ли в фрагменте эмодзи (символы с кодом > 0xFFFF)
-        has_emoji = any(ord(c) > 0xFFFF for c in fragment)
-        
-        # Если есть буквы и нет эмодзи - форматируем
-        if has_letters and not has_emoji:
-            if entity.type == "bold":
-                result.append(f"**{fragment}**")
-            elif entity.type == "italic":
-                result.append(f"*{fragment}*")
-            elif entity.type == "underline":
-                result.append(f"++{fragment}++")
-            elif entity.type == "strikethrough":
-                result.append(f"~~{fragment}~~")
-            elif entity.type == "text_link":
-                result.append(f"[{fragment}]({entity.url})")
-            elif entity.type == "blockquote":
-                result.append(f"> {fragment}")
+        for c in fragment:
+            if ord(c) > 0xFFFF:  # эмодзи
+                if current_text:
+                    text_parts.append(current_text)
+                    current_text = ""
+                emoji_parts.append(c)
             else:
-                result.append(fragment)
-        else:
-            # Если нет букв или есть эмодзи - оставляем как есть
-            result.append(fragment)
+                current_text += c
         
+        if current_text:
+            text_parts.append(current_text)
+        
+        # Форматируем только текстовые части
+        formatted_fragment = []
+        
+        # Сначала добавляем эмодзи (они идут в начале)
+        formatted_fragment.extend(emoji_parts)
+        
+        # Затем форматируем текст
+        for text_part in text_parts:
+            if text_part.strip():  # если есть непробельные символы
+                if entity.type == "bold":
+                    formatted_fragment.append(f"**{text_part}**")
+                elif entity.type == "italic":
+                    formatted_fragment.append(f"*{text_part}*")
+                elif entity.type == "underline":
+                    formatted_fragment.append(f"++{text_part}++")
+                elif entity.type == "strikethrough":
+                    formatted_fragment.append(f"~~{text_part}~~")
+                elif entity.type == "text_link":
+                    formatted_fragment.append(f"[{text_part}]({entity.url})")
+                elif entity.type == "blockquote":
+                    formatted_fragment.append(f"> {text_part}")
+                else:
+                    formatted_fragment.append(text_part)
+            else:
+                formatted_fragment.append(text_part)
+        
+        result.append(''.join(formatted_fragment))
         last_pos = entity.offset + entity.length
     
     # Добавляем остаток текста
@@ -505,7 +522,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (форматирование с игнором эмодзи)\n"
+        "• 📝 Текст (с обработкой эмодзи)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
