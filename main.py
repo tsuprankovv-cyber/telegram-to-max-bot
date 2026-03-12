@@ -77,42 +77,49 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (РАБОЧАЯ ВЕРСИЯ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ПОСИМВОЛЬНОЕ ФОРМАТИРОВАНИЕ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Применяет форматирование к тексту
-    Работает от конца к началу, чтобы не сбивать позиции
+    Применяет форматирование к каждому символу индивидуально
     """
     if not entities:
         return text
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
+    # Создаём массив для каждого символа с набором форматов
+    formats = [[] for _ in range(len(text))]
     
-    for entity in sorted_entities:
-        start = entity.offset
-        end = start + entity.length
-        fragment = result[start:end]
-        
-        if entity.type == "bold":
-            replacement = f"**{fragment}**"
-        elif entity.type == "italic":
-            replacement = f"*{fragment}*"
-        elif entity.type == "underline":
-            replacement = f"++{fragment}++"
-        elif entity.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-        elif entity.type == "text_link":
-            replacement = f"[{fragment}]({entity.url})"
-        elif entity.type == "blockquote":
-            replacement = f"> {fragment}"
-        else:
-            continue
-        
-        result = result[:start] + replacement + result[end:]
+    # Для каждого entity отмечаем каждый символ его типом
+    for entity in entities:
+        fmt_type = entity.type
+        for i in range(entity.offset, entity.offset + entity.length):
+            if i < len(text):
+                formats[i].append(fmt_type)
     
-    return result
+    # Собираем результат
+    result = []
+    for i, char in enumerate(text):
+        formatted_char = char
+        # Применяем все форматы к символу
+        for fmt in formats[i]:
+            if fmt == "bold":
+                formatted_char = f"**{formatted_char}**"
+            elif fmt == "italic":
+                formatted_char = f"*{formatted_char}*"
+            elif fmt == "underline":
+                formatted_char = f"++{formatted_char}++"
+            elif fmt == "strikethrough":
+                formatted_char = f"~~{formatted_char}~~"
+            elif fmt == "text_link":
+                # Для ссылок нужно найти правильный URL
+                for entity in entities:
+                    if entity.type == "text_link" and entity.offset <= i < entity.offset + entity.length:
+                        formatted_char = f"[{formatted_char}]({entity.url})"
+                        break
+            elif fmt == "blockquote":
+                formatted_char = f">{formatted_char}"
+        result.append(formatted_char)
+    
+    return ''.join(result)
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -485,7 +492,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст, форматирование\n"
+        "• 📝 Текст (посимвольное форматирование)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
