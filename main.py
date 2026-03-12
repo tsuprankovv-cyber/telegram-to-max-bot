@@ -77,55 +77,51 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ФИНАЛЬНАЯ ВЕРСИЯ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ПРЕДЫДУЩАЯ РАБОЧАЯ ВЕРСИЯ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст, проходя от конца к началу с учётом смещения
+    Форматирует текст, проходя по entities от начала к концу
     """
     if not entities:
         return text
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
-    offset_correction = 0
+    # Сортируем от начала к концу
+    sorted_entities = sorted(entities, key=lambda e: e.offset)
+    
+    result = []
+    last_pos = 0
     
     for entity in sorted_entities:
-        # Корректируем позицию с учётом предыдущих замен
-        start = entity.offset + offset_correction
-        end = start + entity.length
-        fragment = result[start:end]
+        # Добавляем текст до entity
+        if entity.offset > last_pos:
+            result.append(text[last_pos:entity.offset])
         
-        # Определяем длину добавляемых символов
+        # Берём текст entity
+        fragment = text[entity.offset:entity.offset + entity.length]
+        
+        # Форматируем
         if entity.type == "bold":
-            replacement = f"**{fragment}**"
-            len_diff = 4
+            result.append(f"**{fragment}**")
         elif entity.type == "italic":
-            replacement = f"*{fragment}*"
-            len_diff = 2
+            result.append(f"*{fragment}*")
         elif entity.type == "underline":
-            replacement = f"++{fragment}++"
-            len_diff = 4
+            result.append(f"++{fragment}++")
         elif entity.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-            len_diff = 4
+            result.append(f"~~{fragment}~~")
         elif entity.type == "text_link":
-            replacement = f"[{fragment}]({entity.url})"
-            len_diff = len(fragment) + len(entity.url) + 4
+            result.append(f"[{fragment}]({entity.url})")
         elif entity.type == "blockquote":
-            replacement = f"> {fragment}"
-            len_diff = 2
+            result.append(f"> {fragment}")
         else:
-            continue
+            result.append(fragment)
         
-        # Заменяем
-        result = result[:start] + replacement + result[end:]
-        
-        # Обновляем смещение для следующих entities
-        offset_correction += len(replacement) - len(fragment)
-        logger.debug(f"✅ {entity.type}: {fragment} -> {replacement}, смещение: {offset_correction}")
+        last_pos = entity.offset + entity.length
     
-    return result
+    # Добавляем остаток текста
+    if last_pos < len(text):
+        result.append(text[last_pos:])
+    
+    return ''.join(result)
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -498,7 +494,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (форматирование с учётом смещения)\n"
+        "• 📝 Текст\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
