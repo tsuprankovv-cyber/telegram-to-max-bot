@@ -75,56 +75,45 @@ def safe_filename(filename: str) -> str:
         name = 'file'
     
     result = f"{name}.{ext}" if ext else name
+    logger.debug(f"🏷️ Имя файла: '{filename}' -> '{result}'")
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ПРЕДЫДУЩАЯ РАБОЧАЯ ВЕРСИЯ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (УПРОЩЁННЫЕ) ===
 def format_text(text: str, entities: list) -> str:
-    """
-    Форматирует текст, проходя по entities от начала к концу
-    """
-    if not entities:
-        return text
+    """Простое форматирование текста с entities"""
+    if not entities or not text:
+        return text or ""
     
-    # Сортируем от начала к концу
-    sorted_entities = sorted(entities, key=lambda e: e.offset)
-    
-    result = []
-    last_pos = 0
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    result = text
     
     for entity in sorted_entities:
-        # Добавляем текст до entity
-        if entity.offset > last_pos:
-            result.append(text[last_pos:entity.offset])
+        start = entity.offset
+        end = start + entity.length
+        fragment = result[start:end]
         
-        # Берём текст entity
-        fragment = text[entity.offset:entity.offset + entity.length]
-        
-        # Форматируем
         if entity.type == "bold":
-            result.append(f"**{fragment}**")
+            replacement = f"**{fragment}**"
         elif entity.type == "italic":
-            result.append(f"*{fragment}*")
+            replacement = f"*{fragment}*"
         elif entity.type == "underline":
-            result.append(f"++{fragment}++")
+            replacement = f"++{fragment}++"
         elif entity.type == "strikethrough":
-            result.append(f"~~{fragment}~~")
+            replacement = f"~~{fragment}~~"
         elif entity.type == "text_link":
-            result.append(f"[{fragment}]({entity.url})")
+            replacement = f"[{fragment}]({entity.url})"
         elif entity.type == "blockquote":
-            result.append(f"> {fragment}")
+            replacement = f"> {fragment}"
         else:
-            result.append(fragment)
+            continue
         
-        last_pos = entity.offset + entity.length
+        result = result[:start] + replacement + result[end:]
     
-    # Добавляем остаток текста
-    if last_pos < len(text):
-        result.append(text[last_pos:])
-    
-    return ''.join(result)
+    return result
 
-# === МЕДИА КЛАССЫ ===
 class MediaUploader:
+    """Загрузчик медиа"""
+    
     def __init__(self, token: str):
         self.token = token
         self.base_url = "https://platform-api.max.ru"
@@ -147,6 +136,8 @@ class MediaUploader:
         headers = {"Authorization": self.token}
         params = {"type": media_type}
         
+        logger.info(f"📤 [ЗАГРУЗКА] Создание загрузки для {media_type}")
+        
         async with self.session.post(url, headers=headers, params=params) as resp:
             if resp.status == 200:
                 return await resp.json()
@@ -157,6 +148,8 @@ class MediaUploader:
         await self.ensure_session()
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
         
+        logger.info(f"📤 [ФАЙЛ] Загрузка: {filename}")
+        
         data = aiohttp.FormData()
         data.add_field('file', file_data, filename=filename, content_type=content_type)
         
@@ -166,6 +159,8 @@ class MediaUploader:
     async def upload_file_and_get_token(self, upload_url: str, file_data: bytes, filename: str) -> Optional[str]:
         await self.ensure_session()
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        
+        logger.info(f"📤 [ФАЙЛ] Загрузка: {filename}")
         
         data = aiohttp.FormData()
         data.add_field('file', file_data, filename=filename, content_type=content_type)
@@ -251,6 +246,7 @@ class MediaUploader:
     
     async def upload_voice(self, file_data: bytes, filename: str) -> Optional[str]:
         try:
+            safe_name = safe_filename(filename)
             upload_info = await self.create_upload("audio")
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
@@ -259,7 +255,7 @@ class MediaUploader:
                 self.stats["voice_failed"] += 1
                 return None
             
-            if await self.upload_file_only(upload_url, file_data, filename):
+            if await self.upload_file_only(upload_url, file_data, safe_name):
                 await asyncio.sleep(2)
                 self.stats["voice_ok"] += 1
                 return token
@@ -314,6 +310,10 @@ uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
 
 async def send_to_max(text: str, attachments: List[dict] = None):
+    if not attachments:
+        logger.warning("⚠️ Нет вложений")
+        return False
+    
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
         "Authorization": MAX_TOKEN,
@@ -322,16 +322,13 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     
     data = {
         "text": text or " ",
-        "format": "markdown"
+        "format": "markdown",
+        "attachments": attachments
     }
-    
-    if attachments:
-        data["attachments"] = attachments
     
     logger.info("="*80)
     logger.info(f"📤 ОТПРАВКА В MAX")
-    logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
-    logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
+    logger.info(f"📎 Вложений: {len(attachments)}")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -352,6 +349,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
     text = message.caption or ""
     
     try:
+        # ФОТО
         if message.photo:
             logger.info("🖼️ [ФОТО] Обработка")
             file_info = await downloader.get_file_info(message.photo[-1].file_id)
@@ -362,6 +360,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             })
             uploader.stats["photo_ok"] += 1
         
+        # ВИДЕО
         elif message.video:
             logger.info("🎥 [ВИДЕО] Обработка")
             file_data, filename = await downloader.download_file(message.video.file_id)
@@ -372,6 +371,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token}
                 })
         
+        # АУДИО
         elif message.audio:
             logger.info("🎵 [АУДИО] Обработка")
             file_data, _ = await downloader.download_file(message.audio.file_id)
@@ -384,16 +384,20 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token, "name": safe_name}
                 })
         
+        # ГОЛОСОВЫЕ - ИСПРАВЛЕНО!
         elif message.voice:
             logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
             file_data, filename = await downloader.download_file(message.voice.file_id)
+            # Для голосовых используем upload_voice, который загружает как audio
             token = await uploader.upload_voice(file_data, "voice.ogg")
             if token:
                 attachments.append({
                     "type": "audio",
                     "payload": {"token": token}
                 })
+                logger.info("✅ [ГОЛОСОВОЕ] Готово")
         
+        # ДОКУМЕНТЫ
         elif message.document:
             file_name = message.document.file_name
             logger.info(f"📄 [ДОКУМЕНТ] Обработка: {file_name}")
@@ -411,7 +415,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                         "payload": {"token": token, "name": safe_name}
                     })
             
-            elif ext in ['mp4', 'mov', 'avi']:
+            elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm']:
                 token = await uploader.upload_video(file_data, file_name)
                 if token:
                     attachments.append({
@@ -419,7 +423,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                         "payload": {"token": token}
                     })
             
-            elif ext in ['mp3', 'wav', 'ogg']:
+            elif ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
                 result = await uploader.upload_audio(file_data, file_name)
                 if result:
                     token, safe_name = result
@@ -438,7 +442,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     })
     
     except Exception as e:
-        logger.error(f"❌ Ошибка обработки медиа: {e}")
+        logger.error(f"❌ Ошибка: {e}")
     
     return text, attachments
 
@@ -447,61 +451,37 @@ async def forward(message: types.Message):
     if message.chat.id != TELEGRAM_GROUP_ID:
         return
     
-    logger.info("="*80)
-    logger.info(f"📨 ID: {message.message_id}")
-    logger.info(f"📦 Тип: {message.content_type}")
+    text, attachments = await process_media_message(message)
     
-    # МЕДИА
-    if message.photo or message.video or message.audio or message.voice or message.document:
-        logger.info("📦 Обработка медиа")
-        text, attachments = await process_media_message(message)
-        
-        if not attachments:
-            logger.warning("⚠️ Нет вложений")
-            return
-        
-        # Форматируем подпись
-        if message.caption:
-            text_entities = message.caption_entities or []
-            if text and text_entities:
-                text = format_text(text, text_entities)
-        
-        if message.forward_date and message.forward_from_chat:
-            source = message.forward_from_chat.title
-            text = f"📢 Переслано из {source}:\n\n{text}"
-        
-        await send_to_max(text, attachments)
+    if not attachments:
+        logger.warning("⚠️ Нет вложений")
         return
     
-    # ТЕКСТ
-    if message.text:
-        logger.info("📝 Обработка текста")
-        text = message.text or ""
-        entities = message.entities or []
-        
-        formatted_text = format_text(text, entities)
-        
-        if message.forward_date and message.forward_from_chat:
-            formatted_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{formatted_text}"
-        
-        await send_to_max(formatted_text)
-        return
+    # Форматируем текст подписи
+    if message.caption:
+        text_entities = message.caption_entities
+        if text and text_entities:
+            text = format_text(text, text_entities)
     
-    logger.warning(f"⚠️ Неподдерживаемый тип: {message.content_type}")
+    if message.forward_date and message.forward_from_chat:
+        source = message.forward_from_chat.title
+        text = f"📢 Переслано из {source}:\n\n{text}"
+    
+    await send_to_max(text, attachments)
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
+        "✅ **БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст\n"
-        "• 🖼️ Фото\n"
+        "• 📝 Текст (форматирование)\n"
+        "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
-        "• 🎵 Аудио\n"
+        "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
-        "• 📄 PDF, DOC, XLS\n"
+        "• 🖼️ Фото\n"
         "• 📦 Пакетная отправка\n\n"
-        "✅ **ВСЁ РАБОТАЕТ!**"
+        "📊 Статистика: /stats"
     )
 
 @dp.message(Command("stats"))
