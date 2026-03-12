@@ -77,48 +77,63 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННАЯ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (С УЧЁТОМ ЧАСТИЧНОГО ФОРМАТИРОВАНИЯ) ===
 def format_text(text: str, entities: list) -> str:
-    """Применяет форматирование к тексту с учётом смещения"""
+    """
+    Применяет форматирование к тексту с учётом частичного форматирования слов
+    """
     if not entities:
         return text
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
-    offset_correction = 0
+    # Создаём массив форматирования для каждого символа
+    formats = [[] for _ in range(len(text))]
     
-    for entity in sorted_entities:
-        # Корректируем позицию с учётом предыдущих замен
-        start = entity.offset + offset_correction
-        end = start + entity.length
-        fragment = result[start:end]
-        
-        if entity.type == "bold":
-            replacement = f"**{fragment}**"
-            len_diff = 4
-        elif entity.type == "italic":
-            replacement = f"*{fragment}*"
-            len_diff = 2
-        elif entity.type == "underline":
-            replacement = f"++{fragment}++"
-            len_diff = 4
-        elif entity.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-            len_diff = 4
-        elif entity.type == "text_link":
-            replacement = f"[{fragment}]({entity.url})"
-            len_diff = len(fragment) + len(entity.url) + 4
-        elif entity.type == "blockquote":
-            replacement = f"> {fragment}"
-            len_diff = 2
-        else:
-            continue
-        
-        result = result[:start] + replacement + result[end:]
-        offset_correction += len(replacement) - len(fragment)
+    # Отмечаем каждый символ типом форматирования
+    for entity in entities:
+        fmt_type = entity.type
+        for i in range(entity.offset, entity.offset + entity.length):
+            if i < len(text):
+                formats[i].append(fmt_type)
     
-    return result
+    # Собираем текст с учётом форматирования
+    result = []
+    current_pos = 0
+    
+    while current_pos < len(text):
+        # Определяем текущие форматы на этой позиции
+        current_formats = formats[current_pos] if current_pos < len(formats) else []
+        
+        # Ищем конец блока с такими же форматами
+        end_pos = current_pos
+        while end_pos < len(text) and formats[end_pos] == current_formats:
+            end_pos += 1
+        
+        # Берём текст этого блока
+        fragment = text[current_pos:end_pos]
+        
+        # Применяем все форматы к блоку
+        for fmt in current_formats:
+            if fmt == "bold":
+                fragment = f"**{fragment}**"
+            elif fmt == "italic":
+                fragment = f"*{fragment}*"
+            elif fmt == "underline":
+                fragment = f"++{fragment}++"
+            elif fmt == "strikethrough":
+                fragment = f"~~{fragment}~~"
+            elif fmt == "text_link":
+                # Для ссылок нужно найти соответствующий entity
+                for entity in entities:
+                    if entity.type == "text_link" and entity.offset <= current_pos < entity.offset + entity.length:
+                        fragment = f"[{fragment}]({entity.url})"
+                        break
+            elif fmt == "blockquote":
+                fragment = f"> {fragment}"
+        
+        result.append(fragment)
+        current_pos = end_pos
+    
+    return ''.join(result)
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -491,7 +506,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст, форматирование\n"
+        "• 📝 Текст, форматирование (с частичным выделением)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
