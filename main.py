@@ -77,43 +77,62 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (УПРОЩЁННЫЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ФИНАЛЬНАЯ ВЕРСИЯ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Простое форматирование от конца к началу
+    Форматирует текст, проходя по entities от начала к концу
+    Эмодзи и спецсимволы игнорируются при форматировании
     """
     if not entities:
         return text
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
-    offset_correction = 0
+    # Сортируем от начала к концу
+    sorted_entities = sorted(entities, key=lambda e: e.offset)
+    
+    result = []
+    last_pos = 0
     
     for entity in sorted_entities:
-        start = entity.offset + offset_correction
-        end = start + entity.length
-        fragment = result[start:end]
+        # Добавляем текст до entity
+        if entity.offset > last_pos:
+            result.append(text[last_pos:entity.offset])
         
-        if entity.type == "bold":
-            replacement = f"**{fragment}**"
-        elif entity.type == "italic":
-            replacement = f"*{fragment}*"
-        elif entity.type == "underline":
-            replacement = f"++{fragment}++"
-        elif entity.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-        elif entity.type == "text_link":
-            replacement = f"[{fragment}]({entity.url})"
-        elif entity.type == "blockquote":
-            replacement = f"> {fragment}"
+        # Берём текст entity
+        fragment = text[entity.offset:entity.offset + entity.length]
+        
+        # Проверяем, есть ли в фрагменте буквы (кириллица или латиница)
+        has_letters = any(c.isalpha() for c in fragment)
+        
+        # Проверяем, есть ли в фрагменте эмодзи (символы с кодом > 0xFFFF)
+        has_emoji = any(ord(c) > 0xFFFF for c in fragment)
+        
+        # Если есть буквы и нет эмодзи - форматируем
+        if has_letters and not has_emoji:
+            if entity.type == "bold":
+                result.append(f"**{fragment}**")
+            elif entity.type == "italic":
+                result.append(f"*{fragment}*")
+            elif entity.type == "underline":
+                result.append(f"++{fragment}++")
+            elif entity.type == "strikethrough":
+                result.append(f"~~{fragment}~~")
+            elif entity.type == "text_link":
+                result.append(f"[{fragment}]({entity.url})")
+            elif entity.type == "blockquote":
+                result.append(f"> {fragment}")
+            else:
+                result.append(fragment)
         else:
-            continue
+            # Если нет букв или есть эмодзи - оставляем как есть
+            result.append(fragment)
         
-        result = result[:start] + replacement + result[end:]
-        offset_correction += len(replacement) - len(fragment)
+        last_pos = entity.offset + entity.length
     
-    return result
+    # Добавляем остаток текста
+    if last_pos < len(text):
+        result.append(text[last_pos:])
+    
+    return ''.join(result)
 
 # === МЕДИА КЛАССЫ ===
 class MediaUploader:
@@ -486,7 +505,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (простое форматирование)\n"
+        "• 📝 Текст (форматирование с игнором эмодзи)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
