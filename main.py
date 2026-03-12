@@ -90,6 +90,18 @@ def safe_filename(filename: str) -> str:
     logger.debug(f"🏷️ Имя файла: '{filename}' -> '{result}'")
     return result
 
+def get_audio_filename(message: types.Message) -> str:
+    """Получает оригинальное имя аудиофайла из метаданных Telegram"""
+    if message.audio and message.audio.file_name:
+        # Берём оригинальное имя из аудио
+        return message.audio.file_name
+    elif message.voice:
+        # Для голосовых используем транслит
+        return "voice.mp3"
+    else:
+        # Fallback
+        return "audio.mp3"
+
 class MediaUploader:
     """Загрузчик медиа с правильным получением токенов"""
     
@@ -137,9 +149,37 @@ class MediaUploader:
                 logger.error(f"❌ [ЗАГРУЗКА] Ошибка {resp.status}")
                 raise Exception(f"Ошибка создания загрузки: {resp.status}")
     
-    async def upload_file(self, upload_url: str, file_data: bytes, filename: str) -> Optional[str]:
+    async def upload_file_only(self, upload_url: str, file_data: bytes, filename: str) -> bool:
         """
-        Загружает файл и возвращает токен
+        Только загружает файл, не ищет токен (для видео)
+        """
+        await self.ensure_session()
+        
+        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        
+        logger.info(f"📤 [ФАЙЛ] Загрузка: {filename}")
+        logger.debug(f"   Тип: {content_type}")
+        logger.debug(f"   Размер: {len(file_data)} байт")
+        logger.debug(f"   URL: {upload_url}")
+        
+        data = aiohttp.FormData()
+        data.add_field('file', file_data, filename=filename, content_type=content_type)
+        
+        async with self.session.post(upload_url, data=data) as resp:
+            response_text = await resp.text()
+            logger.debug(f"📥 [ФАЙЛ] Статус: {resp.status}")
+            logger.debug(f"📥 [ФАЙЛ] Ответ: {response_text[:500]}")
+            
+            if resp.status == 200:
+                logger.info(f"✅ [ФАЙЛ] {filename} загружен")
+                return True
+            else:
+                logger.error(f"❌ [ФАЙЛ] Ошибка {resp.status}")
+                return False
+    
+    async def upload_file_and_get_token(self, upload_url: str, file_data: bytes, filename: str) -> Optional[str]:
+        """
+        Загружает файл и возвращает токен из ответа (для документов/аудио)
         """
         await self.ensure_session()
         
@@ -161,7 +201,7 @@ class MediaUploader:
             if resp.status == 200:
                 logger.info(f"✅ [ФАЙЛ] {filename} загружен")
                 
-                # Пробуем получить токен из JSON
+                # Пытаемся получить токен из JSON
                 try:
                     result = json.loads(response_text)
                     if result.get('token'):
@@ -170,7 +210,6 @@ class MediaUploader:
                 except:
                     pass
                 
-                # Для видео/аудио токен может быть в первом ответе
                 logger.warning(f"⚠️ [ТОКЕН] Не найден в ответе")
                 return None
             else:
@@ -178,7 +217,7 @@ class MediaUploader:
                 return None
     
     async def upload_video(self, file_data: bytes, filename: str) -> Optional[str]:
-        """Загрузка видео (РАБОЧАЯ ВЕРСИЯ)"""
+        """Загрузка видео (РАБОЧАЯ ВЕРСИЯ - токен из первого ответа)"""
         try:
             safe_name = safe_filename(filename)
             logger.info(f"🎥 [ВИДЕО] Загрузка: {filename} -> {safe_name}")
@@ -194,7 +233,8 @@ class MediaUploader:
                 self.stats["video_failed"] += 1
                 return None
             
-            if await self.upload_file(upload_url, file_data, safe_name):
+            # Загружаем файл, но НЕ ищем токен в ответе
+            if await self.upload_file_only(upload_url, file_data, safe_name):
                 logger.info(f"⏳ [ВИДЕО] Ожидание обработки (2 сек)...")
                 await asyncio.sleep(2)
                 self.stats["video_ok"] += 1
@@ -223,7 +263,7 @@ class MediaUploader:
                 self.stats["documents_failed"] += 1
                 return None
             
-            token = await self.upload_file(upload_url, file_data, safe_name)
+            token = await self.upload_file_and_get_token(upload_url, file_data, safe_name)
             
             if token:
                 self.stats["documents_ok"] += 1
@@ -239,8 +279,10 @@ class MediaUploader:
             return None
     
     async def upload_audio(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
-        """Загрузка аудио (как документ)"""
+        """Загрузка аудио (как документ, с оригинальным именем)"""
         try:
+            # Для аудио используем оригинальное имя без транслитерации?
+            # Пока оставим транслит для безопасности
             safe_name = safe_filename(filename)
             logger.info(f"🎵 [АУДИО] Загрузка: {filename} -> {safe_name}")
             
@@ -252,7 +294,7 @@ class MediaUploader:
                 self.stats["audio_failed"] += 1
                 return None
             
-            token = await self.upload_file(upload_url, file_data, safe_name)
+            token = await self.upload_file_and_get_token(upload_url, file_data, safe_name)
             
             if token:
                 self.stats["audio_ok"] += 1
@@ -282,7 +324,7 @@ class MediaUploader:
                 self.stats["voice_failed"] += 1
                 return None
             
-            if await self.upload_file(upload_url, file_data, safe_name):
+            if await self.upload_file_only(upload_url, file_data, safe_name):
                 logger.info(f"⏳ [ГОЛОСОВОЕ] Ожидание обработки (2 сек)...")
                 await asyncio.sleep(2)
                 self.stats["voice_ok"] += 1
@@ -351,7 +393,7 @@ class TelegramDownloader:
 uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (без изменений) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ ===
 def format_text_with_entities(text: str, entities: list) -> str:
     if not entities or not text:
         return text or ""
@@ -487,7 +529,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             uploader.stats["photo_ok"] += 1
             logger.info("✅ [ФОТО] Готово")
         
-        # ВИДЕО (рабочая версия)
+        # ВИДЕО (РАБОЧАЯ ВЕРСИЯ)
         elif message.video:
             logger.info("🎥 [ВИДЕО] Обработка")
             file_data, filename = await downloader.download_file(message.video.file_id)
@@ -498,23 +540,27 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token}
                 })
         
-        # АУДИО
+        # АУДИО (с оригинальным именем)
         elif message.audio:
             logger.info("🎵 [АУДИО] Обработка")
-            file_data, filename = await downloader.download_file(message.audio.file_id)
-            result = await uploader.upload_audio(file_data, filename)
+            file_data, _ = await downloader.download_file(message.audio.file_id)
+            # Берём оригинальное имя из метаданных
+            original_name = message.audio.file_name or "audio.mp3"
+            result = await uploader.upload_audio(file_data, original_name)
             if result:
                 token, safe_name = result
                 attachments.append({
                     "type": "file",
                     "payload": {"token": token, "name": safe_name}
                 })
+                logger.info(f"✅ [АУДИО] {safe_name} готов")
         
         # ГОЛОСОВЫЕ
         elif message.voice:
             logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
             file_data, filename = await downloader.download_file(message.voice.file_id)
-            token = await uploader.upload_voice(file_data, filename)
+            # Для голосовых используем стандартное имя
+            token = await uploader.upload_voice(file_data, "voice.ogg")
             if token:
                 attachments.append({
                     "type": "audio",
@@ -528,7 +574,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             
             file_data, _ = await downloader.download_file(message.document.file_id)
             
-            # Определяем тип
+            # Определяем тип по расширению
             ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
             
             if ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt']:
@@ -541,7 +587,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     })
                     logger.info(f"✅ [ДОКУМЕНТ] {safe_name} готов")
             
-            elif ext in ['mp4', 'mov', 'avi']:
+            elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm']:
                 token = await uploader.upload_video(file_data, file_name)
                 if token:
                     attachments.append({
@@ -549,7 +595,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                         "payload": {"token": token}
                     })
             
-            elif ext in ['mp3', 'wav', 'ogg']:
+            elif ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
                 result = await uploader.upload_audio(file_data, file_name)
                 if result:
                     token, safe_name = result
@@ -607,6 +653,8 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         elif 'token' in payload:
             logger.info(f"   {i}. {att_type}: токен {payload['token'][:20]}...")
     
+    logger.debug(f"📦 Полный запрос: {json.dumps(data, indent=2)}")
+    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=data) as resp:
@@ -656,11 +704,12 @@ async def start(message: types.Message):
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
-        "• 🎵 Аудио (файлы)\n"
+        "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
         "• 📦 Пакетная отправка\n\n"
-        "📊 Статистика: /stats"
+        "📊 Статистика: /stats\n"
+        "🔍 Уровень логов: DEBUG"
     )
 
 @dp.message(Command("stats"))
@@ -680,10 +729,10 @@ async def cleanup():
         await downloader.session.close()
     if uploader.session:
         await uploader.session.close()
-    logger.info(f"📊 Итог: {uploader.stats}")
+    logger.info(f"📊 Итоговая статистика: {uploader.stats}")
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА")
+    logger.info("🚀 ЗАПУСК БОТА (МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
