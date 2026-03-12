@@ -3,8 +3,10 @@ import asyncio
 import logging
 import aiohttp
 import json
+import mimetypes
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from datetime import datetime
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -34,14 +36,93 @@ logger.info("="*70)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-def format_text_with_entities(text: str, entities: list) -> str:
-    """
-    Применяет форматирование к тексту, проходя по entities от конца к началу
-    """
-    if not entities:
-        return text
+class MediaUploader:
+    """Класс для загрузки медиа в MAX"""
     
-    # Сортируем от конца к началу, чтобы не сбивать позиции
+    def __init__(self, token: str):
+        self.token = token
+        self.base_url = "https://platform-api.max.ru"
+        self.session = None
+    
+    async def ensure_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+    
+    async def get_upload_url(self, media_type: str) -> dict:
+        """Получает URL для загрузки файла"""
+        await self.ensure_session()
+        url = f"{self.base_url}/uploads?type={media_type}"
+        headers = {"Authorization": self.token}
+        
+        async with self.session.post(url, headers=headers) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            else:
+                error = await resp.text()
+                raise Exception(f"Ошибка получения URL: {resp.status} - {error}")
+    
+    async def upload_file(self, upload_url: str, file_data: bytes, filename: str) -> str:
+        """Загружает файл и возвращает токен"""
+        await self.ensure_session()
+        
+        form = aiohttp.FormData()
+        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        form.add_field('file', file_data, filename=filename, content_type=content_type)
+        
+        async with self.session.post(upload_url, data=form) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                return result.get('token')
+            else:
+                error = await resp.text()
+                raise Exception(f"Ошибка загрузки: {resp.status} - {error}")
+
+class TelegramDownloader:
+    """Класс для скачивания файлов из Telegram"""
+    
+    def __init__(self, token: str):
+        self.token = token
+        self.base_url = f"https://api.telegram.org/file/bot{token}"
+        self.session = None
+    
+    async def ensure_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+    
+    async def get_file_path(self, file_id: str) -> str:
+        """Получает путь к файлу в Telegram"""
+        await self.ensure_session()
+        url = f"https://api.telegram.org/bot{self.token}/getFile"
+        
+        async with self.session.post(url, json={"file_id": file_id}) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data['result']['file_path']
+            else:
+                raise Exception(f"Ошибка получения пути: {resp.status}")
+    
+    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+        """Скачивает файл и возвращает (данные, имя_файла)"""
+        await self.ensure_session()
+        file_path = await self.get_file_path(file_id)
+        filename = file_path.split('/')[-1]
+        
+        url = f"{self.base_url}/{file_path}"
+        async with self.session.get(url) as resp:
+            if resp.status == 200:
+                return (await resp.read(), filename)
+            else:
+                raise Exception(f"Ошибка скачивания: {resp.status}")
+
+# Инициализируем загрузчики
+media_uploader = MediaUploader(MAX_TOKEN)
+tg_downloader = TelegramDownloader(TELEGRAM_TOKEN)
+
+def format_text_with_entities(text: str, entities: list) -> str:
+    """Форматирует текст с entities"""
+    if not entities or not text:
+        return text or ""
+    
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
     
@@ -50,7 +131,6 @@ def format_text_with_entities(text: str, entities: list) -> str:
         end = start + entity.length
         fragment = result[start:end]
         
-        # Применяем форматирование
         if entity.type == "bold":
             replacement = f"**{fragment}**"
         elif entity.type == "italic":
@@ -66,28 +146,21 @@ def format_text_with_entities(text: str, entities: list) -> str:
         else:
             continue
         
-        # Заменяем
         result = result[:start] + replacement + result[end:]
     
     return result
 
 def is_heading(text: str, entities: list) -> bool:
-    """
-    Проверяет, является ли начало текста заголовком
-    """
-    if not entities:
+    """Проверяет, является ли начало заголовком"""
+    if not entities or not text:
         return False
     
-    # Сортируем по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
-    
-    # Проверяем первый entity
     first = sorted_entities[0]
+    
     if first.offset != 0 or first.type != "bold":
         return False
     
-    # Проверяем, что после жирного есть обычный текст
-    # Находим конец жирного блока
     last_pos = 0
     last_bold_end = 0
     
@@ -102,21 +175,16 @@ def is_heading(text: str, entities: list) -> bool:
     if last_bold_end == 0:
         return False
     
-    # Проверяем текст после жирного
     text_after = text[last_bold_end:].lstrip()
     return bool(text_after)
 
 def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
-    """
-    Извлекает заголовок и остальной текст, корректируя entities
-    """
+    """Извлекает заголовок"""
     if not entities:
         return "", text, []
     
-    # Сортируем по позиции
     sorted_entities = sorted(entities, key=lambda e: e.offset)
     
-    # Находим границу заголовка
     last_pos = 0
     heading_end = 0
     
@@ -131,15 +199,11 @@ def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
     if heading_end == 0:
         return "", text, entities
     
-    # Получаем заголовок
     heading = text[:heading_end]
-    
-    # Текст после заголовка (с сохранением пробелов для правильного подсчета)
     after_raw = text[heading_end:]
     after_stripped = after_raw.lstrip()
     spaces = len(after_raw) - len(after_stripped)
     
-    # Корректируем entities для остального текста
     remaining_entities = []
     shift = heading_end + spaces
     
@@ -153,35 +217,106 @@ def extract_heading_text(text: str, entities: list) -> tuple[str, str, list]:
                 new_e.url = e.url
             remaining_entities.append(new_e)
     
-    logger.info(f"✅ Заголовок: '{heading[:30]}...' (пробелов: {spaces})")
     return heading, after_stripped, remaining_entities
 
-def process_message(text: str, entities: list) -> str:
-    """
-    Полная обработка сообщения
-    """
+def process_text_part(text: str, entities: list) -> str:
+    """Обрабатывает текстовую часть сообщения"""
     if not text:
-        return text
+        return ""
     
-    # Проверяем, является ли начало заголовком
     if is_heading(text, entities):
-        # Извлекаем заголовок и остальной текст
         heading, rest, rest_entities = extract_heading_text(text, entities)
-        
-        # Форматируем заголовок (просто добавляем #, без жирного)
         heading_formatted = f"# {heading}"
         
-        # Форматируем остальной текст
         if rest:
             rest_formatted = format_text_with_entities(rest, rest_entities)
             return f"{heading_formatted}\n\n{rest_formatted}"
         return heading_formatted
     
-    # Обычное форматирование
     return format_text_with_entities(text, entities)
 
-async def send_to_max(text: str):
-    """Отправка в MAX"""
+async def process_media_message(message: types.Message) -> tuple[str, list]:
+    """Обрабатывает медиа-сообщение"""
+    attachments = []
+    text = message.caption or ""
+    
+    try:
+        if message.photo:
+            # Фото
+            photo = message.photo[-1]
+            logger.info(f"🖼️ Фото: {photo.width}x{photo.height}")
+            
+            # Для фото используем прямую ссылку
+            file_path = await tg_downloader.get_file_path(photo.file_id)
+            photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+            
+            attachments.append({
+                "type": "image",
+                "payload": {"url": photo_url}
+            })
+            
+        elif message.video:
+            # Видео
+            logger.info(f"🎥 Видео: {message.video.file_name}")
+            file_data, filename = await tg_downloader.download_file(message.video.file_id)
+            
+            upload_info = await media_uploader.get_upload_url("video")
+            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
+            
+            attachments.append({
+                "type": "video",
+                "payload": {"token": token}
+            })
+            
+        elif message.audio:
+            # Аудио
+            logger.info(f"🎵 Аудио: {message.audio.file_name}")
+            file_data, filename = await tg_downloader.download_file(message.audio.file_id)
+            
+            upload_info = await media_uploader.get_upload_url("audio")
+            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
+            
+            attachments.append({
+                "type": "audio",
+                "payload": {"token": token}
+            })
+            
+        elif message.voice:
+            # Голосовое
+            logger.info(f"🎤 Голосовое")
+            file_data, filename = await tg_downloader.download_file(message.voice.file_id)
+            
+            upload_info = await media_uploader.get_upload_url("audio")
+            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
+            
+            attachments.append({
+                "type": "audio",
+                "payload": {"token": token}
+            })
+            
+        elif message.document:
+            # Документ
+            logger.info(f"📄 Документ: {message.document.file_name}")
+            file_data, filename = await tg_downloader.download_file(message.document.file_id)
+            
+            upload_info = await media_uploader.get_upload_url("file")
+            token = await media_uploader.upload_file(upload_info['url'], file_data, filename)
+            
+            attachments.append({
+                "type": "file",
+                "payload": {
+                    "token": token,
+                    "name": filename
+                }
+            })
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки медиа: {e}")
+    
+    return text, attachments
+
+async def send_to_max(text: str, attachments: list = None):
+    """Отправляет сообщение в MAX"""
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
         "Authorization": MAX_TOKEN,
@@ -189,46 +324,84 @@ async def send_to_max(text: str):
     }
     
     data = {
-        "text": text,
+        "text": text or " ",
         "format": "markdown"
     }
     
+    if attachments:
+        data["attachments"] = attachments
+    
     logger.info("="*70)
-    logger.info("📤 ОТПРАВКА")
-    logger.info(f"📝 Текст: {text[:200]}...")
+    logger.info("📤 ОТПРАВКА В MAX")
+    logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
+    logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=data) as resp:
-            if resp.status == 200:
-                logger.info("✅ УСПЕШНО")
-                return True
-            logger.error(f"❌ Ошибка {resp.status}")
+        try:
+            async with session.post(url, headers=headers, json=data) as resp:
+                response = await resp.text()
+                
+                if resp.status == 200:
+                    logger.info("✅ УСПЕШНО")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка {resp.status}: {response}")
+                    return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {e}")
             return False
 
 @dp.message()
 async def forward(message: types.Message):
+    """Пересылает сообщения в MAX"""
     if message.chat.id != TELEGRAM_GROUP_ID:
         return
     
     logger.info("="*70)
     logger.info(f"📨 ID: {message.message_id}")
+    logger.info(f"👤 От: {message.from_user.full_name}")
     
-    text = message.text or message.caption or ""
-    entities = message.entities or message.caption_entities or []
+    # Обрабатываем медиа
+    text, attachments = await process_media_message(message)
     
-    processed = process_message(text, entities)
+    # Обрабатываем текст (заголовки, форматирование)
+    text_entities = message.caption_entities if message.caption else message.entities
+    if text and text_entities:
+        text = process_text_part(text, text_entities)
     
+    # Добавляем подпись для пересланных
     if message.forward_date and message.forward_from_chat:
-        processed = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{processed}"
+        source = message.forward_from_chat.title
+        text = f"📢 Переслано из {source}:\n\n{text}"
     
-    await send_to_max(processed)
+    # Отправляем
+    await send_to_max(text, attachments)
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("✅ Бот работает")
+    await message.answer(
+        "✅ БОТ-ПЕРЕСЫЛЬЩИК MAX\n\n"
+        "📋 **Этап 6: Медиафайлы**\n\n"
+        "Поддерживается:\n"
+        "• Фото с подписями\n"
+        "• Видео\n"
+        "• Аудио\n"
+        "• Голосовые сообщения\n"
+        "• Документы\n"
+        "• Все форматы текста\n"
+        "• Заголовки\n\n"
+        "Отправьте любой файл в группу!"
+    )
+
+async def cleanup():
+    """Закрытие сессий"""
+    if tg_downloader.session:
+        await tg_downloader.session.close()
+    if media_uploader.session:
+        await media_uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК")
+    logger.info("🚀 ЗАПУСК ЭТАПА 6: МЕДИАФАЙЛЫ")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
@@ -237,3 +410,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 Стоп")
+    finally:
+        asyncio.run(cleanup())
