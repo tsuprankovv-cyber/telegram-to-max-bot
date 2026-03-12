@@ -7,7 +7,6 @@ import mimetypes
 import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.utils.text_decorations import add_surrogates, remove_surrogates
 from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -78,59 +77,16 @@ def safe_filename(filename: str) -> str:
     result = f"{name}.{ext}" if ext else name
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ===
-def fix_utf16_entities(text: str, entities: list) -> list:
-    """
-    Исправляет UTF-16 смещения в обычные Python индексы
-    """
-    if not entities:
-        return entities
-    
-    # Конвертируем текст в UTF-16 суррогатную пару
-    text_utf16 = add_surrogates(text)
-    
-    fixed_entities = []
-    for entity in sorted(entities, key=lambda e: e.offset):
-        # В UTF-16 пространстве
-        start_utf16 = entity.offset
-        end_utf16 = entity.offset + entity.length
-        
-        # Получаем текст фрагмента в UTF-16
-        fragment_utf16 = text_utf16[start_utf16:end_utf16]
-        
-        # Удаляем суррогаты для получения обычного текста
-        fragment_normal = remove_surrogates(fragment_utf16)
-        
-        # Находим реальную позицию в обычном тексте
-        prefix_utf16 = text_utf16[:start_utf16]
-        prefix_normal = remove_surrogates(prefix_utf16)
-        real_start = len(prefix_normal)
-        
-        # Создаём новый entity с правильными позициями
-        new_e = type('Entity', (), {})()
-        new_e.offset = real_start
-        new_e.length = len(fragment_normal)
-        new_e.type = entity.type
-        if hasattr(entity, 'url'):
-            new_e.url = entity.url
-        
-        fixed_entities.append(new_e)
-        logger.debug(f"🧬 UTF-16 fix: {entity.type} {entity.offset}->{real_start}, len={entity.length}->{len(fragment_normal)}")
-    
-    return fixed_entities
-
+# === ТЕКСТОВЫЕ ФУНКЦИИ (УПРОЩЁННЫЕ) ===
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст с учётом UTF-16 и изменений длины
+    Форматирует текст с учётом изменений длины
     """
     if not entities:
         return text
     
-    # Исправляем UTF-16 смещения
-    fixed_entities = fix_utf16_entities(text, entities)
-    
     # Сортируем от конца к началу
-    sorted_entities = sorted(fixed_entities, key=lambda e: e.offset, reverse=True)
+    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
     offset_correction = 0
     
@@ -539,7 +495,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **ОБЪЕДИНЁННЫЙ БОТ**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (UTF-16 форматирование)\n"
+        "• 📝 Текст (простое форматирование)\n"
         "• 🖼️ Фото\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио\n"
@@ -568,7 +524,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА (С UTF-16 КОРРЕКЦИЕЙ)")
+    logger.info("🚀 ЗАПУСК БОТА")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
