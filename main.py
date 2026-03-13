@@ -7,7 +7,7 @@ import mimetypes
 import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -36,6 +36,10 @@ logger.info("="*80)
 
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
+
+# === ХРАНИЛИЩЕ ДЛЯ АЛЬБОМОВ ===
+albums: Dict[str, List[types.Message]] = {}
+album_lock = asyncio.Lock()
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -78,7 +82,7 @@ def safe_filename(filename: str) -> str:
     logger.debug(f"🏷️ Имя файла: '{filename}' -> '{result}'")
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (УПРОЩЁННЫЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ ===
 def format_text(text: str, entities: list) -> str:
     """Простое форматирование текста с entities"""
     if not entities or not text:
@@ -123,7 +127,8 @@ class MediaUploader:
             "video_ok": 0, "video_failed": 0,
             "audio_ok": 0, "audio_failed": 0,
             "voice_ok": 0, "voice_failed": 0,
-            "photo_ok": 0
+            "photo_ok": 0,
+            "albums_ok": 0
         }
     
     async def ensure_session(self):
@@ -344,7 +349,8 @@ async def send_to_max(text: str, attachments: List[dict] = None):
             logger.error(f"❌ Ошибка: {e}")
             return False
 
-async def process_media_message(message: types.Message) -> Tuple[str, List[dict]]:
+async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]:
+    """Обработка одного медиа-сообщения"""
     attachments = []
     text = message.caption or ""
     
@@ -384,18 +390,16 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     "payload": {"token": token, "name": safe_name}
                 })
         
-        # ГОЛОСОВЫЕ - ИСПРАВЛЕНО!
+        # ГОЛОСОВЫЕ
         elif message.voice:
             logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
             file_data, filename = await downloader.download_file(message.voice.file_id)
-            # Для голосовых используем upload_voice, который загружает как audio
             token = await uploader.upload_voice(file_data, "voice.ogg")
             if token:
                 attachments.append({
                     "type": "audio",
                     "payload": {"token": token}
                 })
-                logger.info("✅ [ГОЛОСОВОЕ] Готово")
         
         # ДОКУМЕНТЫ
         elif message.document:
@@ -446,28 +450,99 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
     
     return text, attachments
 
+async def process_album_messages(messages: List[types.Message]) -> Tuple[str, List[dict]]:
+    """Обработка всех сообщений из альбома"""
+    all_attachments = []
+    caption = messages[0].caption or ""  # Берём подпись из первого сообщения
+    
+    logger.info(f"📸 [АЛЬБОМ] Обработка {len(messages)} сообщений")
+    
+    for msg in messages:
+        _, attachments = await process_single_media(msg)
+        all_attachments.extend(attachments)
+    
+    uploader.stats["albums_ok"] += 1
+    return caption, all_attachments
+
+async def album_processor(album_id: str, messages: List[types.Message], delay: int = 2):
+    """Обрабатывает альбом после задержки"""
+    await asyncio.sleep(delay)
+    
+    async with album_lock:
+        if album_id in albums:
+            logger.info(f"📸 [АЛЬБОМ] Обработка альбома {album_id}")
+            caption, attachments = await process_album_messages(messages)
+            if attachments:
+                # Форматируем подпись
+                if messages[0].caption_entities:
+                    caption = format_text(caption, messages[0].caption_entities)
+                
+                # Добавляем подпись о пересылке
+                if messages[0].forward_date and messages[0].forward_from_chat:
+                    source = messages[0].forward_from_chat.title
+                    caption = f"📢 Переслано из {source}:\n\n{caption}"
+                
+                await send_to_max(caption, attachments)
+            
+            # Очищаем альбом
+            del albums[album_id]
+
 @dp.message()
 async def forward(message: types.Message):
     if message.chat.id != TELEGRAM_GROUP_ID:
         return
     
-    text, attachments = await process_media_message(message)
-    
-    if not attachments:
-        logger.warning("⚠️ Нет вложений")
+    # Проверяем, является ли сообщение частью альбома
+    if message.media_group_id:
+        album_id = message.media_group_id
+        logger.info(f"📸 [АЛЬБОМ] Получена часть {album_id}")
+        
+        async with album_lock:
+            # Добавляем сообщение в альбом
+            if album_id not in albums:
+                albums[album_id] = []
+                # Запускаем обработчик альбома
+                asyncio.create_task(album_processor(album_id, albums[album_id]))
+            
+            albums[album_id].append(message)
+        
         return
     
-    # Форматируем текст подписи
-    if message.caption:
-        text_entities = message.caption_entities
-        if text and text_entities:
-            text = format_text(text, text_entities)
+    # Обработка одиночных медиа
+    if message.photo or message.video or message.audio or message.voice or message.document:
+        logger.info("📦 Обработка одиночного медиа")
+        text, attachments = await process_single_media(message)
+        
+        if not attachments:
+            logger.warning("⚠️ Нет вложений")
+            return
+        
+        # Форматируем подпись
+        if message.caption:
+            text_entities = message.caption_entities
+            if text and text_entities:
+                text = format_text(text, text_entities)
+        
+        if message.forward_date and message.forward_from_chat:
+            source = message.forward_from_chat.title
+            text = f"📢 Переслано из {source}:\n\n{text}"
+        
+        await send_to_max(text, attachments)
+        return
     
-    if message.forward_date and message.forward_from_chat:
-        source = message.forward_from_chat.title
-        text = f"📢 Переслано из {source}:\n\n{text}"
-    
-    await send_to_max(text, attachments)
+    # ТЕКСТ
+    if message.text:
+        logger.info("📝 Обработка текста")
+        text = message.text or ""
+        entities = message.entities or []
+        
+        formatted_text = format_text(text, entities)
+        
+        if message.forward_date and message.forward_from_chat:
+            formatted_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{formatted_text}"
+        
+        await send_to_max(formatted_text)
+        return
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -480,6 +555,7 @@ async def start(message: types.Message):
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
+        "• 📸 Альбомы (группы фото/видео)\n"
         "• 📦 Пакетная отправка\n\n"
         "📊 Статистика: /stats"
     )
@@ -493,7 +569,8 @@ async def show_stats(message: types.Message):
         f"🎥 Видео: ✅ {stats['video_ok']} | ❌ {stats['video_failed']}\n"
         f"🎵 Аудио: ✅ {stats['audio_ok']} | ❌ {stats['audio_failed']}\n"
         f"🎤 Голосовые: ✅ {stats['voice_ok']} | ❌ {stats['voice_failed']}\n"
-        f"🖼️ Фото: ✅ {stats['photo_ok']}"
+        f"🖼️ Фото: ✅ {stats['photo_ok']}\n"
+        f"📸 Альбомы: ✅ {stats['albums_ok']}"
     )
 
 async def cleanup():
@@ -503,7 +580,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА")
+    logger.info("🚀 ЗАПУСК БОТА (С ПОДДЕРЖКОЙ АЛЬБОМОВ)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
