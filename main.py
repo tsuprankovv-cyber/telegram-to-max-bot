@@ -5,10 +5,10 @@ import aiohttp
 import json
 import mimetypes
 import re
+import math
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from typing import List, Tuple, Optional, Dict
-from datetime import datetime
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -84,6 +84,26 @@ def safe_filename(filename: str) -> str:
     
     result = f"{name}.{ext}" if ext else name
     return result
+
+def split_file_into_chunks(file_path, chunk_size_mb=45):
+    """
+    Разбивает файл на части по chunk_size_mb мегабайт
+    Возвращает список имён созданных файлов
+    """
+    chunk_size = chunk_size_mb * 1024 * 1024  # в байтах
+    file_size = os.path.getsize(file_path)
+    num_chunks = math.ceil(file_size / chunk_size)
+    
+    chunks = []
+    with open(file_path, 'rb') as f:
+        for i in range(num_chunks):
+            chunk_filename = f"{file_path}.part{i+1:03d}"
+            with open(chunk_filename, 'wb') as chunk_file:
+                chunk_file.write(f.read(chunk_size))
+            chunks.append(chunk_filename)
+            logger.info(f"📦 Создана часть {i+1}/{num_chunks}")
+    
+    return chunks
 
 # === ТЕКСТОВЫЕ ФУНКЦИИ ===
 def format_text_with_entities(text: str, entities: list) -> str:
@@ -212,7 +232,6 @@ class MediaUploader:
                 return None
             
             if await self.upload_file_only(upload_url, file_data, safe_name):
-                # Динамическая пауза по формуле
                 wait_time = max(3, file_size_mb / 2)
                 logger.info(f"⏳ [ВИДЕО] Ожидание обработки ({wait_time:.1f} сек)...")
                 await asyncio.sleep(wait_time)
@@ -413,9 +432,9 @@ async def create_attachment(message: types.Message) -> Optional[dict]:
             file_data, _ = await downloader.download_file(message.audio.file_id)
             logger.info(f"🎵 [МЕДИА] Аудио: {message.audio.file_name} - загружаем токен")
             
-            token = await uploader.upload_audio(file_data, message.audio.file_name or "audio.mp3")
-            if token:
-                token_val, safe_name = token
+            result = await uploader.upload_audio(file_data, message.audio.file_name or "audio.mp3")
+            if result:
+                token_val, safe_name = result
                 return {
                     "type": "file",
                     "payload": {"token": token_val, "name": safe_name}
@@ -451,9 +470,9 @@ async def create_attachment(message: types.Message) -> Optional[dict]:
                 }
             else:
                 logger.info(f"📄 [МЕДИА] Документ: {file_name} - загружаем токен")
-                token = await uploader.upload_document(file_data, file_name)
-                if token:
-                    token_val, safe_name = token
+                result = await uploader.upload_document(file_data, file_name)
+                if result:
+                    token_val, safe_name = result
                     return {
                         "type": "file",
                         "payload": {"token": token_val, "name": safe_name}
@@ -462,6 +481,79 @@ async def create_attachment(message: types.Message) -> Optional[dict]:
     except Exception as e:
         logger.error(f"❌ Ошибка создания attachment: {e}")
         return None
+
+async def process_large_video(message: types.Message):
+    """Обрабатывает видео больше 50 МБ"""
+    logger.info(f"🎥 [БОЛЬШОЕ ВИДЕО] Начинаем обработку")
+    
+    try:
+        # 1. Скачиваем видео
+        file_data, filename = await downloader.download_file(message.video.file_id)
+        file_size_mb = len(file_data) / (1024 * 1024)
+        
+        # 2. Сохраняем во временный файл
+        temp_file = f"/tmp/{filename}"
+        with open(temp_file, 'wb') as f:
+            f.write(file_data)
+        
+        # 3. Разбиваем на части
+        logger.info(f"🔪 Разбиваем видео {file_size_mb:.1f} МБ на части")
+        chunks = split_file_into_chunks(temp_file, chunk_size_mb=45)
+        
+        # 4. Загружаем каждую часть в MAX
+        tokens = []
+        for i, chunk_file in enumerate(chunks, 1):
+            with open(chunk_file, 'rb') as f:
+                chunk_data = f.read()
+            
+            logger.info(f"📤 Загрузка части {i}/{len(chunks)}")
+            token = await uploader.upload_video(
+                chunk_data, 
+                f"{filename}.part{i:03d}",
+                len(chunk_data)
+            )
+            if token:
+                tokens.append(token)
+            
+            # Удаляем временный файл части
+            os.remove(chunk_file)
+        
+        # 5. Отправляем все части в MAX как отдельные сообщения
+        if tokens:
+            for i, token in enumerate(tokens, 1):
+                # Формируем подпись для каждой части
+                part_caption = f"🎬 {filename} (часть {i}/{len(tokens)})"
+                if message.caption:
+                    part_caption = f"{message.caption}\n\n{part_caption}"
+                
+                attachments = [{
+                    "type": "video",
+                    "payload": {"token": token}
+                }]
+                
+                await send_to_max(part_caption, attachments)
+            
+            # 6. Отправляем инструкцию по сборке
+            instructions = (
+                f"📹 **Видео разбито на {len(tokens)} частей**\n\n"
+                f"**Как собрать оригинальное видео:**\n\n"
+                f"**Windows:**\n"
+                f"```\ncopy /b {filename}.part* {filename}\n```\n\n"
+                f"**Linux/Mac:**\n"
+                f"```\ncat {filename}.part* > {filename}\n```\n\n"
+                f"После сборки удалите файлы частей."
+            )
+            
+            # Отправляем инструкцию в тот же канал MAX
+            await send_to_max(instructions)
+            
+            logger.info(f"✅ Большое видео обработано: {len(tokens)} частей")
+        
+        # Очистка
+        os.remove(temp_file)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки большого видео: {e}")
 
 async def send_to_max(text: str, attachments: List[dict] = None, buttons: List[List[dict]] = None) -> Optional[str]:
     """Отправляет сообщение в MAX и возвращает URL"""
@@ -575,8 +667,23 @@ async def forward(message: types.Message):
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities
     
-    # Создаём attachment если есть медиа
-    if message.photo or message.video or message.audio or message.voice or message.document:
+    # ВЕТВЬ ДЛЯ ВИДЕО (с проверкой размера)
+    if message.video:
+        file_size_mb = message.video.file_size / (1024 * 1024)
+        
+        if file_size_mb <= 50:
+            # Маленькое видео - старая схема
+            logger.info(f"🎥 [ВИДЕО] Маленькое ({file_size_mb:.1f} МБ)")
+            attachment = await create_attachment(message)
+            if attachment:
+                attachments.append(attachment)
+        else:
+            # Большое видео - новая схема с разбивкой
+            await process_large_video(message)
+            return  # Выходим, так как обработали отдельно
+    
+    # Для остальных типов медиа
+    elif message.photo or message.audio or message.voice or message.document:
         attachment = await create_attachment(message)
         if attachment:
             attachments.append(attachment)
@@ -609,7 +716,7 @@ async def edit_message(message: types.Message):
         return
     
     max_url = message_map[message.message_id]
-    # Извлекаем message_id из URL
+    # Извлекаем message_id из URL (последняя часть после слеша)
     message_id = max_url.split('/')[-1]
     
     logger.info(f"✏️ Редактирование сообщения {message.message_id} -> {max_url}")
@@ -619,7 +726,7 @@ async def edit_message(message: types.Message):
     entities = message.entities or message.caption_entities
     formatted_text = format_text_with_entities(text, entities) if entities else text
     
-    # ПРАВИЛЬНЫЙ эндпоинт согласно документации
+    # ПРАВИЛЬНЫЙ ЭНДПОИНТ согласно документации MAX
     url = f"https://platform-api.max.ru/messages?message_id={message_id}"
     headers = {
         "Authorization": MAX_TOKEN,
@@ -631,11 +738,7 @@ async def edit_message(message: types.Message):
         "format": "markdown"
     }
     
-    # Для медиа-сообщений нужно обновлять attachments
-    if message.photo or message.video or message.audio or message.voice or message.document:
-        attachment = await create_attachment(message)
-        if attachment:
-            data["attachments"] = [attachment]
+    # Для медиа-сообщений attachments можно не трогать
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -654,15 +757,14 @@ async def start(message: types.Message):
         "✅ **MAX ПЕРЕСЫЛЬЩИК (ФИНАЛЬНАЯ ВЕРСИЯ)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📝 Текст с полным форматированием\n"
-        "• 🖼️ Фото (прямые ссылки)\n"
-        "• 🎥 Видео (до 50 МБ)\n"
+        "• 🖼️ Фото\n"
+        "• 🎥 Видео (до 50 МБ - обычная схема, >50 МБ - разбивка на части)\n"
         "• 🎵 Аудио\n"
         "• 🎤 Голосовые\n"
         "• 📄 PDF, DOC, XLS\n"
         "• 🔗 Кнопки-ссылки\n"
         "• 📸 Альбомы\n"
-        "• ✏️ Редактирование\n\n"
-        "⚠️ Видео >50 МБ требуют Local API Server\n\n"
+        "• ✏️ Редактирование (24 часа)\n\n"
         "📊 Статистика: /stats"
     )
 
