@@ -495,39 +495,45 @@ async def process_video(message: types.Message) -> List[dict]:
     
     # ВАРИАНТ 1: Маленькое видео (≤20 МБ) - скачиваем и загружаем
     if file_size_mb <= 20:
-        logger.info(f"🎥 [ВИДЕО] Вариант 1: ≤20 МБ ({file_size_mb:.1f} МБ)")
-        file_data, filename = await downloader.download_file(message.video.file_id)
-        token = await uploader.upload_video(file_data, filename)
-        if token:
-            return [{"type": "video", "payload": {"token": token}}]
-    
-    # ВАРИАНТ 2: Среднее видео (20-50 МБ) - прямая ссылка
-    elif file_size_mb <= 50:
-        logger.info(f"🎥 [ВИДЕО] Вариант 2: 20-50 МБ ({file_size_mb:.1f} МБ) - ссылка")
+        logger.info(f"🎥 [ВИДЕО] Вариант 1: ≤20 МБ ({file_size_mb:.1f} МБ) - скачиваем")
         try:
-            file_info = await downloader.get_file_info(message.video.file_id)
-            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
-            return [{"type": "video", "payload": {"url": file_url}}]
-        except Exception as e:
-            logger.warning(f"⚠️ Ссылка не сработала, пробуем вариант 1")
-            # Если ссылка не сработала, пробуем скачать
             file_data, filename = await downloader.download_file(message.video.file_id)
             token = await uploader.upload_video(file_data, filename)
             if token:
                 return [{"type": "video", "payload": {"token": token}}]
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка скачивания, пробуем вариант 2")
+            # Если не удалось скачать, пробуем ссылку
+            try:
+                file_info = await downloader.get_file_info(message.video.file_id)
+                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
+                return [{"type": "video", "payload": {"url": file_url}}]
+            except:
+                return []
+    
+    # ВАРИАНТ 2: Среднее видео (20-50 МБ) - только ссылка (не скачиваем!)
+    elif file_size_mb <= 50:
+        logger.info(f"🎥 [ВИДЕО] Вариант 2: 20-50 МБ ({file_size_mb:.1f} МБ) - ссылка")
+        try:
+            # Получаем только информацию, не скачиваем!
+            file_info = await downloader.get_file_info(message.video.file_id)
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
+            return [{"type": "video", "payload": {"url": file_url}}]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения ссылки: {e}")
+            return []
     
     # ВАРИАНТ 3: Большое видео (>50 МБ) - разбивка на части
     else:
         logger.info(f"🎥 [ВИДЕО] Вариант 3: >50 МБ ({file_size_mb:.1f} МБ) - разбивка")
         return await process_large_video_chunks(message)
-    
-    return []
 
 async def process_album(album_id: str, messages: List[types.Message]):
     """Обрабатывает альбом из нескольких сообщений"""
     logger.info(f"📸 [АЛЬБОМ] Обработка {len(messages)} сообщений")
     
-    all_attachments = []
+    photo_video_attachments = []
+    document_attachments = []
     caption = messages[0].caption or ""
     caption_entities = messages[0].caption_entities
     
@@ -536,7 +542,7 @@ async def process_album(album_id: str, messages: List[types.Message]):
         if msg.photo:
             file_info = await downloader.get_file_info(msg.photo[-1].file_id)
             file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
-            all_attachments.append({
+            photo_video_attachments.append({
                 "type": "image",
                 "payload": {"url": file_url}
             })
@@ -545,7 +551,7 @@ async def process_album(album_id: str, messages: List[types.Message]):
         # Видео
         elif msg.video:
             video_attachments = await process_video(msg)
-            all_attachments.extend(video_attachments)
+            photo_video_attachments.extend(video_attachments)
         
         # Документы
         elif msg.document:
@@ -558,7 +564,7 @@ async def process_album(album_id: str, messages: List[types.Message]):
             if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
                 file_info = await downloader.get_file_info(msg.document.file_id)
                 file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
-                all_attachments.append({
+                photo_video_attachments.append({
                     "type": "image",
                     "payload": {"url": file_url}
                 })
@@ -567,22 +573,26 @@ async def process_album(album_id: str, messages: List[types.Message]):
                 result = await uploader.upload_document(file_data, file_name)
                 if result:
                     token, safe_name = result
-                    all_attachments.append({
+                    document_attachments.append({
                         "type": "file",
                         "payload": {"token": token, "name": safe_name}
                     })
     
-    if all_attachments:
-        # Форматируем подпись
-        formatted_text = format_text_with_entities(caption, caption_entities) if caption_entities else caption
-        
-        # Добавляем подпись о пересылке
-        if messages[0].forward_date and messages[0].forward_from_chat:
-            source = messages[0].forward_from_chat.title
-            formatted_text = f"📢 Переслано из {source}:\n\n{formatted_text}"
-        
-        # Отправляем
-        await send_to_max(formatted_text, all_attachments)
+    # Форматируем подпись
+    formatted_text = format_text_with_entities(caption, caption_entities) if caption_entities else caption
+    
+    # Добавляем подпись о пересылке
+    if messages[0].forward_date and messages[0].forward_from_chat:
+        source = messages[0].forward_from_chat.title
+        formatted_text = f"📢 Переслано из {source}:\n\n{formatted_text}"
+    
+    # Отправляем фото и видео одним сообщением
+    if photo_video_attachments:
+        await send_to_max(formatted_text, photo_video_attachments)
+    
+    # Отправляем каждый документ отдельно
+    for doc_attachment in document_attachments:
+        await send_to_max(formatted_text, [doc_attachment])
 
 async def process_album_after_delay(album_id: str, delay: int = 2):
     """Обрабатывает альбом после небольшой задержки"""
@@ -709,9 +719,9 @@ async def start(message: types.Message):
         "• 🎥 Видео (≤20 МБ - токен, 20-50 МБ - ссылка, >50 МБ - разбивка)\n"
         "• 🎵 Аудио\n"
         "• 🎤 Голосовые\n"
-        "• 📄 PDF, DOC, XLS\n"
+        "• 📄 PDF, DOC, XLS (каждый документ отдельно)\n"
         "• 🔗 Кнопки-ссылки\n"
-        "• 📸 Альбомы\n\n"
+        "• 📸 Альбомы (фото+видео вместе, документы отдельно)\n\n"
         "📊 Статистика: /stats"
     )
 
