@@ -457,14 +457,28 @@ async def process_album_messages(messages: List[types.Message]) -> Tuple[str, Li
     
     logger.info(f"📸 [АЛЬБОМ] Обработка {len(messages)} сообщений")
     
-    for msg in messages:
+    # Сортируем сообщения: сначала фото, потом видео
+    # Это помогает лучше организовать альбом
+    sorted_messages = sorted(messages, key=lambda m: (
+        0 if m.photo else 1,  # фото первыми
+        m.message_id  # сохраняем порядок
+    ))
+    
+    for i, msg in enumerate(sorted_messages):
+        logger.info(f"📸 [АЛЬБОМ] Элемент {i+1}: {'фото' if msg.photo else 'видео'}")
         _, attachments = await process_single_media(msg)
         all_attachments.extend(attachments)
+        
+        # Если это видео, даём дополнительное время на обработку
+        if msg.video:
+            logger.info(f"⏳ [АЛЬБОМ] Дополнительная пауза для видео")
+            await asyncio.sleep(1)
     
     uploader.stats["albums_ok"] += 1
+    logger.info(f"📸 [АЛЬБОМ] Всего вложений: {len(all_attachments)}")
     return caption, all_attachments
 
-async def album_processor(album_id: str, messages: List[types.Message], delay: int = 2):
+async def album_processor(album_id: str, messages: List[types.Message], delay: int = 3):
     """Обрабатывает альбом после задержки"""
     await asyncio.sleep(delay)
     
@@ -483,6 +497,8 @@ async def album_processor(album_id: str, messages: List[types.Message], delay: i
                     caption = f"📢 Переслано из {source}:\n\n{caption}"
                 
                 await send_to_max(caption, attachments)
+            else:
+                logger.warning(f"⚠️ [АЛЬБОМ] Нет вложений для отправки")
             
             # Очищаем альбом
             del albums[album_id]
@@ -505,6 +521,7 @@ async def forward(message: types.Message):
                 asyncio.create_task(album_processor(album_id, albums[album_id]))
             
             albums[album_id].append(message)
+            logger.info(f"📸 [АЛЬБОМ] В альбоме {len(albums[album_id])} сообщений")
         
         return
     
@@ -555,7 +572,7 @@ async def start(message: types.Message):
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
-        "• 📸 Альбомы (группы фото/видео)\n"
+        "• 📸 Альбомы (фото+фото, видео+видео, фото+видео)\n"
         "• 📦 Пакетная отправка\n\n"
         "📊 Статистика: /stats"
     )
