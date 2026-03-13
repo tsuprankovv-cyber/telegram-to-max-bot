@@ -179,11 +179,20 @@ class MediaUploader:
                     return None
             return None
     
-    async def upload_video(self, file_data: bytes, filename: str) -> Optional[str]:
+    async def upload_video(self, file_data: bytes, filename: str, file_size: int = None) -> Optional[str]:
+        """Загрузка видео с динамической паузой в зависимости от размера"""
         try:
             safe_name = safe_filename(filename)
-            upload_info = await self.create_upload("video")
             
+            # Определяем размер видео
+            if file_size:
+                file_size_mb = file_size / (1024 * 1024)
+            else:
+                file_size_mb = len(file_data) / (1024 * 1024)
+            
+            logger.info(f"🎥 [ВИДЕО] Загрузка: {filename} ({file_size_mb:.1f} MB)")
+            
+            upload_info = await self.create_upload("video")
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
             
@@ -192,8 +201,13 @@ class MediaUploader:
                 return None
             
             if await self.upload_file_only(upload_url, file_data, safe_name):
-                await asyncio.sleep(2)
+                # Динамическая пауза: минимум 3 сек, дальше по формуле
+                wait_time = max(3, file_size_mb / 2)
+                logger.info(f"⏳ [ВИДЕО] Ожидание обработки ({wait_time:.1f} сек)...")
+                await asyncio.sleep(wait_time)
+                
                 self.stats["video_ok"] += 1
+                logger.info(f"✅ [ВИДЕО] {safe_name} готов")
                 return token
             else:
                 self.stats["video_failed"] += 1
@@ -206,6 +220,8 @@ class MediaUploader:
     async def upload_document(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
         try:
             safe_name = safe_filename(filename)
+            logger.info(f"📄 [ДОКУМЕНТ] Загрузка: {filename} -> {safe_name}")
+            
             upload_info = await self.create_upload("file")
             upload_url = upload_info.get('url')
             
@@ -229,6 +245,8 @@ class MediaUploader:
     async def upload_audio(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
         try:
             safe_name = safe_filename(filename)
+            logger.info(f"🎵 [АУДИО] Загрузка: {filename} -> {safe_name}")
+            
             upload_info = await self.create_upload("file")
             upload_url = upload_info.get('url')
             
@@ -252,6 +270,10 @@ class MediaUploader:
     async def upload_voice(self, file_data: bytes, filename: str) -> Optional[str]:
         try:
             safe_name = safe_filename(filename)
+            file_size_mb = len(file_data) / (1024 * 1024)
+            
+            logger.info(f"🎤 [ГОЛОСОВОЕ] Загрузка: {filename} ({file_size_mb:.1f} MB)")
+            
             upload_info = await self.create_upload("audio")
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
@@ -261,7 +283,11 @@ class MediaUploader:
                 return None
             
             if await self.upload_file_only(upload_url, file_data, safe_name):
-                await asyncio.sleep(2)
+                # Для голосовых чуть меньше времени
+                wait_time = max(2, file_size_mb / 3)
+                logger.info(f"⏳ [ГОЛОСОВОЕ] Ожидание обработки ({wait_time:.1f} сек)...")
+                await asyncio.sleep(wait_time)
+                
                 self.stats["voice_ok"] += 1
                 return token
             else:
@@ -370,7 +396,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
         elif message.video:
             logger.info("🎥 [ВИДЕО] Обработка")
             file_data, filename = await downloader.download_file(message.video.file_id)
-            token = await uploader.upload_video(file_data, filename)
+            token = await uploader.upload_video(file_data, filename, message.video.file_size)
             if token:
                 attachments.append({
                     "type": "video",
@@ -420,7 +446,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
                     })
             
             elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm']:
-                token = await uploader.upload_video(file_data, file_name)
+                token = await uploader.upload_video(file_data, file_name, message.document.file_size)
                 if token:
                     attachments.append({
                         "type": "video",
@@ -453,15 +479,14 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
 async def process_album_messages(messages: List[types.Message]) -> Tuple[str, List[dict]]:
     """Обработка всех сообщений из альбома"""
     all_attachments = []
-    caption = messages[0].caption or ""  # Берём подпись из первого сообщения
+    caption = messages[0].caption or ""
     
     logger.info(f"📸 [АЛЬБОМ] Обработка {len(messages)} сообщений")
     
     # Сортируем сообщения: сначала фото, потом видео
-    # Это помогает лучше организовать альбом
     sorted_messages = sorted(messages, key=lambda m: (
-        0 if m.photo else 1,  # фото первыми
-        m.message_id  # сохраняем порядок
+        0 if m.photo else 1,
+        m.message_id
     ))
     
     for i, msg in enumerate(sorted_messages):
@@ -469,10 +494,12 @@ async def process_album_messages(messages: List[types.Message]) -> Tuple[str, Li
         _, attachments = await process_single_media(msg)
         all_attachments.extend(attachments)
         
-        # Если это видео, даём дополнительное время на обработку
-        if msg.video:
-            logger.info(f"⏳ [АЛЬБОМ] Дополнительная пауза для видео")
-            await asyncio.sleep(1)
+        # Если это видео, даём динамическую паузу в зависимости от размера
+        if msg.video and msg.video.file_size:
+            file_size_mb = msg.video.file_size / (1024 * 1024)
+            wait_time = max(1, file_size_mb / 5)
+            logger.info(f"⏳ [АЛЬБОМ] Пауза для видео ({wait_time:.1f} сек)")
+            await asyncio.sleep(wait_time)
     
     uploader.stats["albums_ok"] += 1
     logger.info(f"📸 [АЛЬБОМ] Всего вложений: {len(all_attachments)}")
@@ -568,7 +595,7 @@ async def start(message: types.Message):
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📝 Текст (форматирование)\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
-        "• 🎥 Видео\n"
+        "• 🎥 Видео (с динамической паузой)\n"
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
@@ -597,7 +624,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА (С ПОДДЕРЖКОЙ АЛЬБОМОВ)")
+    logger.info("🚀 ЗАПУСК БОТА (С ДИНАМИЧЕСКОЙ ПАУЗОЙ ДЛЯ ВИДЕО)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
