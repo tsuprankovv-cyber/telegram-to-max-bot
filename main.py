@@ -41,6 +41,22 @@ dp = Dispatcher()
 albums: Dict[str, List[types.Message]] = {}
 album_lock = asyncio.Lock()
 
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ UTF-16 ===
+def utf16_len(text: str) -> int:
+    """Возвращает длину строки в UTF-16 символах"""
+    return len(text.encode('utf-16-le')) // 2
+
+def utf16_slice(text: str, start: int, length: int) -> str:
+    """Вырезает фрагмент текста по UTF-16 координатам"""
+    text_utf16 = text.encode('utf-16-le')
+    start_byte = start * 2
+    end_byte = (start + length) * 2
+    return text_utf16[start_byte:end_byte].decode('utf-16-le')
+
+def get_utf16_position(text: str, pos: int) -> int:
+    """Преобразует обычную позицию в UTF-16 позицию"""
+    return utf16_len(text[:pos])
+
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
@@ -82,19 +98,27 @@ def safe_filename(filename: str) -> str:
     logger.debug(f"🏷️ Имя файла: '{filename}' -> '{result}'")
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ===
 def format_text(text: str, entities: list) -> str:
-    if not entities or not text:
-        return text or ""
+    """
+    Форматирует текст с учетом UTF-16 смещений
+    """
+    if not entities:
+        return text
     
+    # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
+    offset_correction = 0
     
     for entity in sorted_entities:
-        start = entity.offset
-        end = start + entity.length
-        fragment = result[start:end]
+        # Корректируем позицию с учетом предыдущих замен
+        start = entity.offset + offset_correction
         
+        # Получаем фрагмент с учетом UTF-16
+        fragment = utf16_slice(result, start, entity.length)
+        
+        # Форматируем
         if entity.type == "bold":
             replacement = f"**{fragment}**"
         elif entity.type == "italic":
@@ -110,11 +134,19 @@ def format_text(text: str, entities: list) -> str:
         else:
             continue
         
-        result = result[:start] + replacement + result[end:]
+        # Заменяем в тексте (здесь уже работаем с обычными индексами)
+        result = result[:start] + replacement + result[start + entity.length:]
+        
+        # Обновляем смещение
+        len_diff = len(replacement) - len(fragment)
+        offset_correction += len_diff
+        logger.debug(f"✅ {entity.type}: {fragment} -> {replacement}, смещение: {offset_correction}")
     
     return result
 
 class MediaUploader:
+    """Загрузчик медиа"""
+    
     def __init__(self, token: str):
         self.token = token
         self.base_url = "https://platform-api.max.ru"
@@ -400,6 +432,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
     text = message.caption or ""
     
     try:
+        # ФОТО
         if message.photo:
             logger.info("🖼️ [ФОТО] Обработка")
             file_info = await downloader.get_file_info(message.photo[-1].file_id)
@@ -411,6 +444,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
             uploader.stats["photo_ok"] += 1
             logger.info("✅ [ФОТО] Готово")
         
+        # ВИДЕО
         elif message.video:
             logger.info(f"🎥 [ВИДЕО] Обработка")
             file_data, filename = await downloader.download_file(message.video.file_id)
@@ -421,6 +455,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
                     "payload": {"token": token}
                 })
         
+        # АУДИО
         elif message.audio:
             logger.info("🎵 [АУДИО] Обработка")
             file_data, _ = await downloader.download_file(message.audio.file_id)
@@ -434,6 +469,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
                 })
                 logger.info(f"✅ [АУДИО] {safe_name} готов")
         
+        # ГОЛОСОВЫЕ
         elif message.voice:
             logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
             file_data, filename = await downloader.download_file(message.voice.file_id)
@@ -445,6 +481,7 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
                 })
                 logger.info("✅ [ГОЛОСОВОЕ] Готово")
         
+        # ДОКУМЕНТЫ
         elif message.document:
             file_name = message.document.file_name
             logger.info(f"📄 [ДОКУМЕНТ] Обработка: {file_name}")
@@ -600,7 +637,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (форматирование)\n"
+        "• 📝 Текст (с поддержкой UTF-16)\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио (с именами)\n"
@@ -631,7 +668,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА")
+    logger.info("🚀 ЗАПУСК БОТА (С ПОДДЕРЖКОЙ UTF-16)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
