@@ -5,12 +5,9 @@ import aiohttp
 import json
 import mimetypes
 import re
-import time
-import tempfile
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from typing import List, Tuple, Optional, Dict
-from pyrogram import Client
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -24,10 +21,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_GROUP_ID = int(os.getenv('TELEGRAM_GROUP_ID'))
 MAX_TOKEN = os.getenv('MAX_TOKEN')
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
-API_ID = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
 
-if not all([TELEGRAM_TOKEN, TELEGRAM_GROUP_ID, MAX_TOKEN, MAX_CHANNEL_ID, API_ID, API_HASH]):
+if not all([TELEGRAM_TOKEN, TELEGRAM_GROUP_ID, MAX_TOKEN, MAX_CHANNEL_ID]):
     logger.error("❌ Не все переменные окружения установлены!")
     raise ValueError("Missing environment variables")
 
@@ -41,15 +36,6 @@ logger.info("="*80)
 
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-
-# === ИНИЦИАЛИЗАЦИЯ PYROGRAM ===
-pyro_client = Client(
-    name="bot_session",
-    api_id=int(API_ID),
-    api_hash=API_HASH,
-    bot_token=TELEGRAM_TOKEN,
-    in_memory=True
-)
 
 # === ХРАНИЛИЩЕ ДЛЯ АЛЬБОМОВ ===
 albums: Dict[str, List[types.Message]] = {}
@@ -156,9 +142,7 @@ class MediaUploader:
         
         async with self.session.post(url, headers=headers, params=params) as resp:
             if resp.status == 200:
-                result = await resp.json()
-                logger.info(f"✅ [ЗАГРУЗКА] Успешно")
-                return result
+                return await resp.json()
             else:
                 raise Exception(f"Ошибка создания загрузки: {resp.status}")
     
@@ -330,40 +314,51 @@ class TelegramDownloader:
         await self.ensure_session()
         url = f"{self.api_url}/getFile"
         
-        async with self.session.post(url, json={"file_id": file_id}) as resp:
+        for attempt in range(2):
+            try:
+                async with self.session.post(url, json={"file_id": file_id}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        file_size = data['result'].get('file_size', 0)
+                        logger.info(f"✅ [TG] Файл готов: {file_size / (1024*1024):.1f} МБ")
+                        return data['result']
+                    elif resp.status == 400:
+                        logger.warning(f"⚠️ [TG] Файл не готов, попытка {attempt + 1}/2")
+                        await asyncio.sleep(3)
+                    else:
+                        raise Exception(f"Ошибка получения информации: {resp.status}")
+            except Exception as e:
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(3)
+        
+        raise Exception("Не удалось получить информацию о файле")
+    
+    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+        await self.ensure_session()
+        
+        file_info = await self.get_file_info(file_id)
+        file_path = file_info['file_path']
+        filename = file_path.split('/')[-1]
+        
+        url = f"{self.file_url}/{file_path}"
+        
+        file_size = file_info.get('file_size', 0)
+        timeout = aiohttp.ClientTimeout(total=max(60, file_size / (1024 * 1024) * 2))
+        
+        logger.info(f"📥 [TG] Скачивание: {filename}")
+        
+        async with self.session.get(url, timeout=timeout) as resp:
             if resp.status == 200:
-                data = await resp.json()
-                return data['result']
+                data = await resp.read()
+                logger.info(f"✅ [TG] Скачано {len(data)} байт")
+                return (data, filename)
             else:
-                raise Exception(f"Ошибка получения информации: {resp.status}")
+                raise Exception(f"Ошибка скачивания: {resp.status}")
 
 # Инициализируем
 uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
-
-async def download_video_with_pyrogram(file_id: str, file_name: str) -> Optional[bytes]:
-    try:
-        logger.info(f"📥 [PYRO] Начало скачивания видео: {file_name}")
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-            path = await pyro_client.download_media(
-                message=file_id,
-                file_name=tmp_file.name,
-                progress=lambda current, total: logger.debug(f"⏳ [PYRO] Прогресс: {current}/{total} байт")
-            )
-            
-            if path:
-                with open(path, 'rb') as f:
-                    data = f.read()
-                os.unlink(path)
-                logger.info(f"✅ [PYRO] Видео скачано: {len(data) / (1024*1024):.1f} МБ")
-                return data
-            else:
-                logger.error("❌ [PYRO] Ошибка скачивания")
-                return None
-    except Exception as e:
-        logger.error(f"❌ [PYRO] Ошибка: {e}")
-        return None
 
 async def send_to_max(text: str, attachments: List[dict] = None):
     if not attachments:
@@ -417,40 +412,14 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
             logger.info("✅ [ФОТО] Готово")
         
         elif message.video:
-            logger.info(f"🎥 [ВИДЕО] Обработка через Pyrogram")
-            
-            file_id = message.video.file_id
-            file_name = message.video.file_name or f"video_{file_id}.mp4"
-            file_size = message.video.file_size / (1024 * 1024)
-            
-            logger.info(f"📊 Размер видео: {file_size:.1f} МБ")
-            
-            video_data = await download_video_with_pyrogram(file_id, file_name)
-            
-            if video_data:
-                upload_info = await uploader.create_upload("video")
-                token = upload_info.get('token')
-                upload_url = upload_info.get('url')
-                
-                if token and upload_url:
-                    success = await uploader.upload_file_only(upload_url, video_data, safe_filename(file_name))
-                    
-                    if success:
-                        attachments.append({
-                            "type": "video",
-                            "payload": {"token": token}
-                        })
-                        uploader.stats["video_ok"] += 1
-                        logger.info(f"✅ [ВИДЕО] Успешно загружено")
-                    else:
-                        logger.error("❌ [ВИДЕО] Ошибка загрузки в MAX")
-                        uploader.stats["video_failed"] += 1
-                else:
-                    logger.error("❌ [ВИДЕО] Не получен токен")
-                    uploader.stats["video_failed"] += 1
-            else:
-                logger.error("❌ [ВИДЕО] Не удалось скачать")
-                uploader.stats["video_failed"] += 1
+            logger.info(f"🎥 [ВИДЕО] Обработка")
+            file_data, filename = await downloader.download_file(message.video.file_id)
+            token = await uploader.upload_video(file_data, filename, message.video.file_size)
+            if token:
+                attachments.append({
+                    "type": "video",
+                    "payload": {"token": token}
+                })
         
         elif message.audio:
             logger.info("🎵 [АУДИО] Обработка")
@@ -495,22 +464,12 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
                     logger.info(f"✅ [ДОКУМЕНТ] {safe_name} готов")
             
             elif ext in ['mp4', 'mov', 'avi', 'mkv', 'webm']:
-                file_id = message.document.file_id
-                video_data = await download_video_with_pyrogram(file_id, file_name)
-                
-                if video_data:
-                    upload_info = await uploader.create_upload("video")
-                    token = upload_info.get('token')
-                    upload_url = upload_info.get('url')
-                    
-                    if token and upload_url:
-                        success = await uploader.upload_file_only(upload_url, video_data, safe_filename(file_name))
-                        if success:
-                            attachments.append({
-                                "type": "video",
-                                "payload": {"token": token}
-                            })
-                            logger.info(f"✅ [ВИДЕО] {file_name} готов")
+                token = await uploader.upload_video(file_data, file_name, message.document.file_size)
+                if token:
+                    attachments.append({
+                        "type": "video",
+                        "payload": {"token": token}
+                    })
             
             elif ext in ['mp3', 'wav', 'ogg', 'm4a', 'flac']:
                 result = await uploader.upload_audio(file_data, file_name)
@@ -643,11 +602,11 @@ async def start(message: types.Message):
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📝 Текст (форматирование)\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
-        "• 🎥 Видео (до 2 ГБ через Pyrogram)\n"
+        "• 🎥 Видео\n"
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
-        "• 📸 Альбомы (фото+фото, видео+видео, фото+видео)\n"
+        "• 📸 Альбомы\n"
         "• 📦 Пакетная отправка\n\n"
         "📊 Статистика: /stats"
     )
@@ -665,25 +624,14 @@ async def show_stats(message: types.Message):
         f"📸 Альбомы: ✅ {stats['albums_ok']}"
     )
 
-async def on_startup():
-    logger.info("🚀 Запуск Pyrogram клиента...")
-    await pyro_client.start()
-    logger.info("✅ Pyrogram клиент запущен")
-
-async def on_shutdown():
-    logger.info("🛑 Остановка Pyrogram клиента...")
-    await pyro_client.stop()
-    logger.info("✅ Pyrogram клиент остановлен")
-    
+async def cleanup():
     if downloader.session:
         await downloader.session.close()
     if uploader.session:
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА (С PYROGRAM ДЛЯ БОЛЬШИХ ВИДЕО)")
-    
-    await on_startup()
+    logger.info("🚀 ЗАПУСК БОТА")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
@@ -693,4 +641,4 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logger.info("🛑 Стоп")
     finally:
-        asyncio.run(on_shutdown())
+        asyncio.run(cleanup())
