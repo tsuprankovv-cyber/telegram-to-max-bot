@@ -335,33 +335,53 @@ class TelegramDownloader:
         if not self.session:
             self.session = aiohttp.ClientSession()
     
-    async def get_file_info(self, file_id: str) -> dict:
+    async def get_file_info(self, file_id: str, expected_size: int = None) -> dict:
+        """Получает информацию о файле с увеличенными задержками для больших видео"""
         await self.ensure_session()
         url = f"{self.api_url}/getFile"
         
-        for attempt in range(3):
+        # Определяем максимальное количество попыток
+        max_attempts = 8 if expected_size and expected_size > 50 * 1024 * 1024 else 5
+        base_delay = 5  # начальная задержка 5 секунд
+        
+        for attempt in range(max_attempts):
             try:
                 async with self.session.post(url, json={"file_id": file_id}) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        file_size = data['result'].get('file_size', 0)
+                        logger.info(f"✅ [TG] Файл готов: {file_size / (1024*1024):.1f} МБ")
                         return data['result']
                     elif resp.status == 400:
-                        # Файл ещё не готов, ждём и пробуем снова
-                        logger.warning(f"⚠️ [TG] Файл не готов, попытка {attempt + 1}/3")
-                        await asyncio.sleep(2 ** attempt)  # 1, 2, 4 секунды
+                        # Файл ещё не готов
+                        wait_time = base_delay * (2 ** attempt)  # 5, 10, 20, 40, 80, 160, 320, 640 секунд
+                        logger.warning(f"⚠️ [TG] Файл не готов, попытка {attempt + 1}/{max_attempts}, ждём {wait_time} сек")
+                        
+                        # Для очень больших видео логируем каждые 30 секунд
+                        if wait_time > 60:
+                            chunks = wait_time // 30
+                            for i in range(int(chunks)):
+                                await asyncio.sleep(30)
+                                logger.info(f"⏳ [TG] Ожидание файла... {i*30 + 30}/{wait_time} сек")
+                        else:
+                            await asyncio.sleep(wait_time)
                     else:
                         raise Exception(f"Ошибка получения информации: {resp.status}")
             except Exception as e:
-                if attempt == 2:
+                if attempt == max_attempts - 1:
+                    logger.error(f"❌ [TG] Все попытки исчерпаны: {e}")
                     raise
-                await asyncio.sleep(2 ** attempt)
+                wait_time = base_delay * (2 ** attempt)
+                logger.warning(f"⚠️ [TG] Ошибка, повтор через {wait_time} сек: {e}")
+                await asyncio.sleep(wait_time)
         
         raise Exception("Не удалось получить информацию о файле")
     
-    async def download_file(self, file_id: str) -> tuple[bytes, str]:
+    async def download_file(self, file_id: str, expected_size: int = None) -> tuple[bytes, str]:
         await self.ensure_session()
         
-        file_info = await self.get_file_info(file_id)
+        # Сначала получаем информацию о файле (с ожиданием)
+        file_info = await self.get_file_info(file_id, expected_size)
         file_path = file_info['file_path']
         filename = file_path.split('/')[-1]
         
@@ -440,7 +460,10 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
         # ВИДЕО
         elif message.video:
             logger.info("🎥 [ВИДЕО] Обработка")
-            file_data, filename = await downloader.download_file(message.video.file_id)
+            file_data, filename = await downloader.download_file(
+                message.video.file_id, 
+                message.video.file_size
+            )
             token = await uploader.upload_video(file_data, filename, message.video.file_size)
             if token:
                 attachments.append({
@@ -477,7 +500,10 @@ async def process_single_media(message: types.Message) -> Tuple[str, List[dict]]
             file_name = message.document.file_name
             logger.info(f"📄 [ДОКУМЕНТ] Обработка: {file_name}")
             
-            file_data, _ = await downloader.download_file(message.document.file_id)
+            file_data, _ = await downloader.download_file(
+                message.document.file_id,
+                message.document.file_size
+            )
             
             ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
             
@@ -640,7 +666,7 @@ async def start(message: types.Message):
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📝 Текст (форматирование)\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
-        "• 🎥 Видео (до 500 МБ, динамическое ожидание)\n"
+        "• 🎥 Видео (до 500 МБ, увеличенные таймауты)\n"
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n"
@@ -669,7 +695,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА (С ПОДДЕРЖКОЙ БОЛЬШИХ ВИДЕО ДО 500 МБ)")
+    logger.info("🚀 ЗАПУСК БОТА (С УВЕЛИЧЕННЫМИ ТАЙМАУТАМИ ДЛЯ БОЛЬШИХ ВИДЕО)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
