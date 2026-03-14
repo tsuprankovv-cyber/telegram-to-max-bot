@@ -41,22 +41,6 @@ dp = Dispatcher()
 albums: Dict[str, List[types.Message]] = {}
 album_lock = asyncio.Lock()
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ UTF-16 ===
-def utf16_len(text: str) -> int:
-    """Возвращает длину строки в UTF-16 символах"""
-    return len(text.encode('utf-16-le')) // 2
-
-def utf16_slice(text: str, start: int, length: int) -> str:
-    """Вырезает фрагмент текста по UTF-16 координатам"""
-    text_utf16 = text.encode('utf-16-le')
-    start_byte = start * 2
-    end_byte = (start + length) * 2
-    return text_utf16[start_byte:end_byte].decode('utf-16-le')
-
-def get_utf16_position(text: str, pos: int) -> int:
-    """Преобразует обычную позицию в UTF-16 позицию"""
-    return utf16_len(text[:pos])
-
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
@@ -98,27 +82,20 @@ def safe_filename(filename: str) -> str:
     logger.debug(f"🏷️ Имя файла: '{filename}' -> '{result}'")
     return result
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ (ИСПРАВЛЕННЫЕ) ===
+# === ТЕКСТОВЫЕ ФУНКЦИИ (ПРОСТЫЕ) ===
 def format_text(text: str, entities: list) -> str:
-    """
-    Форматирует текст с учетом UTF-16 смещений
-    """
-    if not entities:
-        return text
+    """Простое форматирование текста с entities"""
+    if not entities or not text:
+        return text or ""
     
-    # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
-    offset_correction = 0
     
     for entity in sorted_entities:
-        # Корректируем позицию с учетом предыдущих замен
-        start = entity.offset + offset_correction
+        start = entity.offset
+        end = start + entity.length
+        fragment = result[start:end]
         
-        # Получаем фрагмент с учетом UTF-16
-        fragment = utf16_slice(result, start, entity.length)
-        
-        # Форматируем
         if entity.type == "bold":
             replacement = f"**{fragment}**"
         elif entity.type == "italic":
@@ -134,13 +111,7 @@ def format_text(text: str, entities: list) -> str:
         else:
             continue
         
-        # Заменяем в тексте (здесь уже работаем с обычными индексами)
-        result = result[:start] + replacement + result[start + entity.length:]
-        
-        # Обновляем смещение
-        len_diff = len(replacement) - len(fragment)
-        offset_correction += len_diff
-        logger.debug(f"✅ {entity.type}: {fragment} -> {replacement}, смещение: {offset_correction}")
+        result = result[:start] + replacement + result[end:]
     
     return result
 
@@ -215,6 +186,7 @@ class MediaUploader:
             return None
     
     async def upload_video(self, file_data: bytes, filename: str, file_size: int = None) -> Optional[str]:
+        """Загрузка видео через прямые ссылки"""
         try:
             safe_name = safe_filename(filename)
             
@@ -236,12 +208,7 @@ class MediaUploader:
             if await self.upload_file_only(upload_url, file_data, safe_name):
                 wait_time = max(5, file_size_mb * 1.5)
                 logger.info(f"⏳ [ВИДЕО] Ожидание обработки ({wait_time:.1f} сек)...")
-                
-                chunk = 30
-                for i in range(0, int(wait_time), chunk):
-                    await asyncio.sleep(min(chunk, wait_time - i))
-                    if i + chunk < wait_time:
-                        logger.info(f"⏳ [ВИДЕО] Обработка... {i + chunk:.0f}/{wait_time:.0f} сек")
+                await asyncio.sleep(wait_time)
                 
                 self.stats["video_ok"] += 1
                 logger.info(f"✅ [ВИДЕО] {safe_name} готов")
@@ -351,8 +318,6 @@ class TelegramDownloader:
                 async with self.session.post(url, json={"file_id": file_id}) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        file_size = data['result'].get('file_size', 0)
-                        logger.info(f"✅ [TG] Файл готов: {file_size / (1024*1024):.1f} МБ")
                         return data['result']
                     elif resp.status == 400:
                         logger.warning(f"⚠️ [TG] Файл не готов, попытка {attempt + 1}/2")
@@ -374,13 +339,9 @@ class TelegramDownloader:
         filename = file_path.split('/')[-1]
         
         url = f"{self.file_url}/{file_path}"
-        
-        file_size = file_info.get('file_size', 0)
-        timeout = aiohttp.ClientTimeout(total=max(60, file_size / (1024 * 1024) * 2))
-        
         logger.info(f"📥 [TG] Скачивание: {filename}")
         
-        async with self.session.get(url, timeout=timeout) as resp:
+        async with self.session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.read()
                 logger.info(f"✅ [TG] Скачано {len(data)} байт")
@@ -637,7 +598,7 @@ async def start(message: types.Message):
     await message.answer(
         "✅ **БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (с поддержкой UTF-16)\n"
+        "• 📝 Текст (форматирование)\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио (с именами)\n"
@@ -668,7 +629,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("🚀 ЗАПУСК БОТА (С ПОДДЕРЖКОЙ UTF-16)")
+    logger.info("🚀 ЗАПУСК БОТА")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
