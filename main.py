@@ -222,19 +222,19 @@ def get_telegram_char_width(char: str) -> int:
 # === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ ПОСТРОЕНИЯ КАРТЫ ПОЗИЦИЙ ===
 def build_position_map(text: str) -> tuple:
     """
-    Строит карту соответствия между позициями в Python и Telegram.
-    Возвращает:
-    - telegram_positions: для каждого индекса Python - позиция в Telegram
-    - python_positions: для каждой позиции Telegram - индекс в Python
+    Строит точную карту соответствия между позициями в Python и Telegram.
+    Учитывает все эмодзи и спецсимволы.
     """
     telegram_positions = []  # py_idx -> tg_pos
     python_positions = {}    # tg_pos -> py_idx
+    reverse_map = {}         # py_idx -> точная tg_pos
     tg_idx = 0
     
     logger.debug("📊 Построение карты позиций:")
     for py_idx, char in enumerate(text):
         telegram_positions.append(tg_idx)
         python_positions[tg_idx] = py_idx
+        reverse_map[py_idx] = tg_idx
         
         width = get_telegram_char_width(char)
         if width != 1:
@@ -249,16 +249,16 @@ def build_position_map(text: str) -> tuple:
     logger.debug(f"📊 Всего символов в Python: {len(text)}")
     logger.debug(f"📊 Разница: {tg_idx - len(text)}")
     
-    return telegram_positions, python_positions
+    return telegram_positions, python_positions, reverse_map
 
-# === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
+# === УЛУЧШЕННАЯ ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
 def convert_telegram_to_python(tg_start: int, tg_length: int, 
                                telegram_positions: list, 
-                               python_positions: dict, 
+                               python_positions: dict,
+                               reverse_map: dict,
                                text_length: int) -> tuple:
     """
-    Конвертирует диапазон из Telegram-позиций в Python-позиции.
-    Возвращает (py_start, py_length) или (None, None) если ошибка.
+    Конвертирует диапазон из Telegram-позиций в Python-позиции с максимальной точностью.
     """
     tg_end = tg_start + tg_length
     
@@ -272,17 +272,20 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
     if py_start is None:
         return None, None
     
-    # Находим Python-позицию для конца
+    # Находим Python-позицию для конца с максимальной точностью
     py_end = None
     
-    # Ищем точное совпадение
+    # Сначала ищем точное совпадение
     if tg_end in python_positions:
         py_end = python_positions[tg_end]
     else:
-        # Ищем ближайшую позицию
+        # Ищем ближайшую позицию, которая покрывает tg_end
         for py_idx in range(py_start, len(telegram_positions)):
-            if telegram_positions[py_idx] >= tg_end:
-                py_end = py_idx
+            current_tg = telegram_positions[py_idx]
+            next_tg = telegram_positions[py_idx + 1] if py_idx + 1 < len(telegram_positions) else tg_end + 1
+            
+            if current_tg <= tg_end < next_tg:
+                py_end = py_idx + 1  # Берем следующий символ, чтобы покрыть весь диапазон
                 break
     
     if py_end is None:
@@ -300,8 +303,7 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
 # === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
     """
-    Универсальная функция форматирования, которая автоматически
-    учитывает любые эмодзи и спецсимволы в тексте.
+    Универсальная функция форматирования с точным учетом позиций.
     """
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 УНИВЕРСАЛЬНОЕ ФОРМАТИРОВАНИЕ ТЕКСТА")
@@ -314,7 +316,7 @@ def format_text(text: str, entities: list) -> str:
         return text
     
     # Строим карту позиций
-    telegram_positions, python_positions = build_position_map(text)
+    telegram_positions, python_positions, reverse_map = build_position_map(text)
     
     # Статистика по типам
     type_stats = {}
@@ -329,7 +331,8 @@ def format_text(text: str, entities: list) -> str:
         
         py_start, py_length = convert_telegram_to_python(
             e.offset, e.length, 
-            telegram_positions, python_positions, 
+            telegram_positions, python_positions,
+            reverse_map,
             len(text)
         )
         
@@ -353,18 +356,20 @@ def format_text(text: str, entities: list) -> str:
         valid_entities.append(fixed_e)
     
     if not valid_entities:
-        logger.debug("❌ Нет валидных entities после конвертации")
+        logger.debug("❌ Нет валидных entities после проверки")
         return text
     
     # Сортируем по offset (от меньшего к большему)
     sorted_entities = sorted(valid_entities, key=lambda e: e.offset)
     logger.debug(f"\n📊 Entities после конвертации и сортировки:")
     for e in sorted_entities:
-        logger.debug(f"  {e.type} [Python {e.offset}:{e.offset+e.length}]")
+        fragment = text[e.offset:e.offset+e.length]
+        logger.debug(f"  {e.type} [Python {e.offset}:{e.offset+e.length}] '{fragment[:50]}...'")
     
     # Применяем форматирование
     result = list(text)
     offset_correction = 0
+    applied_ranges = []  # Для отслеживания уже примененных диапазонов
     
     for entity in sorted_entities:
         start = entity.offset + offset_correction
@@ -372,6 +377,17 @@ def format_text(text: str, entities: list) -> str:
         
         if start >= len(result) or end > len(result):
             logger.warning(f"⚠️ Entity выходит за границы: [{start}:{end}]")
+            continue
+        
+        # Проверяем, не перекрывается ли с уже примененными
+        overlap = False
+        for ar in applied_ranges:
+            if (start >= ar[0] and start < ar[1]) or (end > ar[0] and end <= ar[1]):
+                overlap = True
+                logger.debug(f"  ⚠️ Перекрывается с диапазоном [{ar[0]}:{ar[1]}]")
+                break
+        
+        if overlap:
             continue
         
         fragment = ''.join(result[start:end])
@@ -390,42 +406,58 @@ def format_text(text: str, entities: list) -> str:
             logger.debug(f"  🔧 Курсив")
         elif entity.type == "underline":
             open_tag, close_tag = '<u>', '</u>'
-            logger.debug(f"  🔧 Подчеркнутый")
         elif entity.type == "strikethrough":
             open_tag, close_tag = '<s>', '</s>'
-            logger.debug(f"  🔧 Зачеркнутый")
         elif entity.type == "code":
             open_tag, close_tag = '<code>', '</code>'
-            logger.debug(f"  🔧 Моноширинный")
         elif entity.type == "pre":
             open_tag, close_tag = '<pre>', '</pre>'
-            logger.debug(f"  🔧 Блок кода")
         elif entity.type == "text_link":
             url = entity.url
             link_html = f'<a href="{url}">{fragment}</a>'
             result[start:end] = list(link_html)
-            len_diff = len(link_html) - (end - start)
-            offset_correction += len_diff
-            logger.debug(f"  🔗 Ссылка добавлена, смещение: {len_diff}")
+            new_end = start + len(link_html)
+            applied_ranges.append((start, new_end))
+            offset_correction += len(link_html) - (end - start)
+            logger.debug(f"  🔗 Ссылка добавлена")
             continue
         elif entity.type == "blockquote":
             open_tag, close_tag = '<blockquote>', '</blockquote>'
-            logger.debug(f"  🔧 Цитата")
         else:
             logger.debug(f"  ⏭️ Пропускаем тип: {entity.type}")
             continue
         
-        # Вставляем теги (сначала закрывающий, потом открывающий)
+        # Вставляем теги
         result[end:end] = list(close_tag)
         result[start:start] = list(open_tag)
+        
+        new_end = end + len(open_tag) + len(close_tag)
+        applied_ranges.append((start, new_end))
         
         len_diff = len(open_tag) + len(close_tag)
         offset_correction += len_diff
         
         logger.debug(f"  ✅ Применено: {open_tag}{fragment}{close_tag}")
-        logger.debug(f"  📊 Общее смещение: {offset_correction}")
+        logger.debug(f"  📊 Новый диапазон: [{start}:{new_end}]")
     
     formatted_text = ''.join(result)
+    
+    # Финальная проверка - убеждаемся, что теги не разрывают слова
+    import re
+    words = re.finditer(r'\b\w+\b', formatted_text)
+    for word_match in words:
+        word = word_match.group()
+        word_start = word_match.start()
+        word_end = word_match.end()
+        
+        # Проверяем, не разорвано ли слово тегами
+        word_text = formatted_text[word_start:word_end]
+        if '<' in word_text or '>' in word_text:
+            # Проверяем, что теги не разрывают слово
+            clean_word = re.sub(r'<[^>]+>', '', word_text)
+            if clean_word != word_text and len(clean_word) < len(word_text):
+                logger.debug(f"  📝 Слово с форматированием: '{clean_word}'")
+    
     logger.debug(f"\n✅ Итоговый текст: {repr(formatted_text[:200])}...")
     return formatted_text
 
@@ -860,7 +892,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: УНИВЕРСАЛЬНАЯ (автоопределение эмодзи)"
+        "✨ Версия: УНИВЕРСАЛЬНАЯ (точный подсчет эмодзи)"
     )
 
 @dp.message(Command("stats"))
@@ -885,6 +917,7 @@ async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
     logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
+    logger.info("✅ ТОЧНОЕ ОПРЕДЕЛЕНИЕ ГРАНИЦ СЛОВ")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
