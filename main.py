@@ -5,6 +5,8 @@ import aiohttp
 import json
 import mimetypes
 import re
+import sys
+import unicodedata
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from typing import List, Tuple, Optional
@@ -125,13 +127,35 @@ def format_text(text: str, entities: list) -> str:
         type_stats[e.type] = type_stats.get(e.type, 0) + 1
     logger.debug(f"📊 Типы форматирования: {type_stats}")
     
-    # Показываем все оригинальные позиции форматирования
+    # Показываем все оригинальные позиции форматирования и проверяем границы
+    valid_entities = []
     for i, e in enumerate(entities):
-        fragment = text[e.offset:e.offset+e.length]
-        logger.debug(f"  Entity {i}: {e.type} [{e.offset}:{e.offset+e.length}] '{fragment}'")
+        # Проверяем, что offset в пределах текста
+        if e.offset >= len(text):
+            logger.warning(f"⚠️ Entity {i} полностью за границами текста (offset {e.offset} >= {len(text)})")
+            continue
+        
+        # Вычисляем конечную позицию
+        end_pos = e.offset + e.length
+        
+        # Корректируем, если выходит за границы
+        if end_pos > len(text):
+            logger.warning(f"⚠️ Entity {i} выходит за границы текста: [{e.offset}:{end_pos}] (длина {len(text)})")
+            # Корректируем длину
+            e.length = len(text) - e.offset
+            end_pos = len(text)
+            logger.debug(f"   Корректировка: новая длина {e.length}, новый конец {end_pos}")
+        
+        fragment = text[e.offset:end_pos]
+        logger.debug(f"  Entity {i}: {e.type} [{e.offset}:{end_pos}] '{fragment}'")
+        valid_entities.append(e)
+    
+    if not valid_entities:
+        logger.debug("❌ Нет валидных entities после проверки")
+        return text
     
     # Сортируем от КОНЦА к НАЧАЛУ, чтобы не ломать индексы при вставке
-    sorted_entities = sorted(entities, key=lambda e: e.offset + e.length, reverse=True)
+    sorted_entities = sorted(valid_entities, key=lambda e: e.offset + e.length, reverse=True)
     
     # Работаем с текстом как со списком для удобства вставки
     result = list(text)
@@ -140,9 +164,9 @@ def format_text(text: str, entities: list) -> str:
         start = entity.offset
         end = start + entity.length
         
-        # Проверяем границы
+        # Двойная проверка границ
         if start >= len(result) or end > len(result):
-            logger.warning(f"⚠️ Entity выходит за границы текста: [{start}:{end}] (длина текста {len(result)})")
+            logger.warning(f"⚠️ Entity выходит за границы после сортировки: [{start}:{end}] (длина {len(result)})")
             continue
         
         # Получаем фрагмент, который нужно отформатировать
@@ -150,7 +174,7 @@ def format_text(text: str, entities: list) -> str:
         
         logger.debug(f"\n--- Entity [{entity.type}] ---")
         logger.debug(f"  📍 Оригинальный offset: {start}")
-        logger.debug(f"  📏 Оригинальная длина: {entity.length}")
+        logger.debug(f"  📏 Длина: {entity.length}")
         logger.debug(f"  📝 Фрагмент: '{fragment}'")
         
         # Определяем HTML-теги для разных типов форматирования
@@ -632,7 +656,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: Исправлено форматирование (точные координаты из Telegram)"
+        "✨ Версия: Исправлено форматирование (проверка границ)"
     )
 
 @dp.message(Command("stats"))
@@ -656,7 +680,7 @@ async def cleanup():
 async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
-    logger.info("✅ Точные координаты из Telegram (ИСПРАВЛЕНО)")
+    logger.info("✅ Проверка границ entities (ИСПРАВЛЕНО)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
