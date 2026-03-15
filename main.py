@@ -361,9 +361,10 @@ def format_text(text: str, entities: list) -> str:
         logger.debug("❌ Нет валидных entities после проверки")
         return text
     
-    # Сортируем по offset (от меньшего к большему)
+    # ВАЖНО: Сортируем по offset (от меньшего к большему)
+    # Это гарантирует правильный порядок обработки
     sorted_entities = sorted(valid_entities, key=lambda e: e.offset)
-    logger.debug(f"\n📊 Entities после конвертации и сортировки:")
+    logger.debug(f"\n📊 Entities после конвертации и сортировки (по offset):")
     for e in sorted_entities:
         fragment = text[e.offset:e.offset+e.length]
         logger.debug(f"  {e.type} [Python {e.offset}:{e.offset+e.length}] '{fragment[:50]}...'")
@@ -390,6 +391,7 @@ def format_text(text: str, entities: list) -> str:
                 break
         
         if overlap:
+            logger.debug(f"  ⏭️ Пропускаем из-за перекрытия")
             continue
         
         fragment = ''.join(result[start:end])
@@ -904,6 +906,7 @@ async def main():
     logger.info("✅ Поддержка всех типов форматирования")
     logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
     logger.info("✅ ТОЧНОЕ СЛЕДОВАНИЕ ИСХОДНОЙ РАЗМЕТКЕ")
+    logger.info("✅ ПРАВИЛЬНАЯ СОРТИРОВКА ПО OFFSET")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
