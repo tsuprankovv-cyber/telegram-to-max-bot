@@ -103,93 +103,77 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === UTF-16 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-def utf16_len(text: str) -> int:
-    """Возвращает длину строки в UTF-16 символах"""
-    return len(text.encode('utf-16-le')) // 2
-
-def utf16_slice(text: str, start: int, length: int) -> str:
-    """Вырезает фрагмент текста по UTF-16 координатам"""
-    text_utf16 = text.encode('utf-16-le')
-    start_byte = start * 2
-    end_byte = (start + length) * 2
-    return text_utf16[start_byte:end_byte].decode('utf-16-le')
-
-# === ТЕКСТОВЫЕ ФУНКЦИИ С UTF-16 ПОДДЕРЖКОЙ ===
+# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
-    """Форматирует текст с учетом UTF-16 смещений"""
+    """Форматирует жирный текст с защитой от смещения"""
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
-    logger.debug(f"📝 Исходный текст: {repr(text)}")
+    logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
     logger.debug(f"📊 Всего entities: {len(entities)}")
     
     if not entities:
         logger.debug("❌ Нет entities для форматирования")
         return text
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    logger.debug(f"📌 Сортировка entities от конца к началу")
+    # Отбираем только жирные entities
+    bold_entities = [e for e in entities if e.type == "bold"]
+    logger.debug(f"📊 Найдено жирных entities: {len(bold_entities)}")
     
+    if not bold_entities:
+        logger.debug("❌ Нет жирных entities")
+        return text
+    
+    # Сортируем от конца к началу
+    sorted_entities = sorted(bold_entities, key=lambda e: e.offset, reverse=True)
     result = text
     offset_correction = 0
     
     for idx, entity in enumerate(sorted_entities):
-        logger.debug(f"\n--- Entity {idx+1} ---")
-        logger.debug(f"📌 Тип: {entity.type}")
+        logger.debug(f"\n--- Жирный entity {idx+1} ---")
         logger.debug(f"📌 Оригинальный offset: {entity.offset}")
         logger.debug(f"📌 Длина: {entity.length}")
-        logger.debug(f"📌 offset_correction: {offset_correction}")
+        logger.debug(f"📌 Текущая коррекция: {offset_correction}")
         
-        # Корректируем позицию с учетом UTF-16
         start = entity.offset + offset_correction
-        logger.debug(f"📌 Скорректированная позиция start: {start}")
+        end = start + entity.length
+        logger.debug(f"📌 Скорректированная позиция: {start} - {end}")
         
-        # Получаем фрагмент с учетом UTF-16
-        try:
-            fragment = utf16_slice(result, start, entity.length)
-            logger.debug(f"📌 Получен фрагмент (UTF-16): '{fragment}'")
-        except Exception as e:
-            logger.warning(f"⚠️ UTF-16 срез не сработал: {e}")
-            end = start + entity.length
-            if end > len(result):
-                logger.warning(f"⚠️ Выход за границы: start={start}, end={end}, len={len(result)}")
-                continue
-            fragment = result[start:end]
-            logger.debug(f"📌 Получен фрагмент (обычный): '{fragment}'")
+        # Проверка границ
+        if start >= len(result):
+            logger.warning(f"⚠️ start {start} вне текста (длина {len(result)})")
+            continue
+        if end > len(result):
+            logger.warning(f"⚠️ end {end} вне текста (длина {len(result)})")
+            continue
+            
+        fragment = result[start:end]
+        logger.debug(f"📌 Фрагмент: '{fragment}'")
         
-        # Форматируем
-        if entity.type == "bold":
-            replacement = f"**{fragment}**"
-        elif entity.type == "italic":
-            replacement = f"*{fragment}*"
-        elif entity.type == "underline":
-            replacement = f"++{fragment}++"
-        elif entity.type == "strikethrough":
-            replacement = f"~~{fragment}~~"
-        elif entity.type == "text_link":
-            replacement = f"[{fragment}]({entity.url})"
-        elif entity.type == "blockquote":
-            replacement = f"> {fragment}"
-        else:
-            logger.debug(f"⏭️ Неподдерживаемый тип: {entity.type}")
+        # Проверка на наличие букв
+        has_letters = any(c.isalpha() for c in fragment)
+        logger.debug(f"📌 Есть буквы: {has_letters}")
+        
+        if not has_letters:
+            logger.debug("⏭️ Пропускаем - нет букв")
             continue
         
+        # Проверка на длину
+        stripped = fragment.strip()
+        if len(stripped) < 2:
+            logger.debug("⏭️ Пропускаем - слишком короткий")
+            continue
+        
+        # Заменяем
+        replacement = f"**{fragment}**"
         logger.debug(f"🔧 Замена: '{fragment}' -> '{replacement}'")
         
-        # Заменяем в тексте
-        before = result[:start]
-        after = result[start + entity.length:]
-        result = before + replacement + after
-        
+        result = result[:start] + replacement + result[end:]
         len_diff = len(replacement) - len(fragment)
         offset_correction += len_diff
         logger.debug(f"📊 Изменение длины: {len_diff}")
-        logger.debug(f"📊 Новый offset_correction: {offset_correction}")
-        logger.debug(f"📊 Текст после замены: {repr(result)}")
+        logger.debug(f"📊 Новая коррекция: {offset_correction}")
     
-    logger.debug(f"\n✅ Итоговый текст: {repr(result)}")
-    logger.debug(f"{'='*60}\n")
+    logger.debug(f"\n✅ Итоговый текст: {repr(result[:200])}...")
     return result
 
 class MediaUploader:
@@ -397,7 +381,6 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         "Content-Type": "application/json"
     }
     
-    # ВАЖНО: format должен быть в корне объекта
     data = {
         "text": text or " ",
         "format": "markdown"
@@ -410,20 +393,19 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     logger.info(f"📤 ОТПРАВКА В MAX")
     logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
     logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
-    logger.debug(f"📦 Полные данные запроса: {json.dumps(data, indent=2, ensure_ascii=False)}")
+    logger.debug(f"📦 Полные данные запроса: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=data) as resp:
                 response_text = await resp.text()
                 logger.info(f"📥 Статус ответа: {resp.status}")
-                logger.debug(f"📥 Тело ответа: {response_text}")
                 
                 if resp.status == 200:
                     logger.info("✅ УСПЕШНО")
                     return True
                 else:
-                    logger.error(f"❌ Ошибка {resp.status}: {response_text}")
+                    logger.error(f"❌ Ошибка {resp.status}: {response_text[:200]}")
                     return False
         except Exception as e:
             logger.error(f"❌ Ошибка: {e}")
@@ -432,11 +414,6 @@ async def send_to_max(text: str, attachments: List[dict] = None):
 async def process_media_message(message: types.Message) -> Tuple[str, List[dict]]:
     attachments = []
     text = message.caption or ""
-    
-    logger.debug(f"\n{'='*60}")
-    logger.debug(f"📦 ОБРАБОТКА МЕДИА СООБЩЕНИЯ")
-    logger.debug(f"📝 Исходная подпись: {repr(text)}")
-    logger.debug(f"📊 Есть caption_entities: {len(message.caption_entities) if message.caption_entities else 0}")
     
     try:
         # ФОТО
@@ -449,7 +426,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                 "payload": {"url": photo_url}
             })
             uploader.stats["photo_ok"] += 1
-            logger.debug(f"✅ Фото обработано, URL: {photo_url[:50]}...")
         
         # ВИДЕО
         elif message.video:
@@ -533,8 +509,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
     
-    logger.debug(f"📦 Всего вложений: {len(attachments)}")
-    logger.debug(f"{'='*60}\n")
     return text, attachments
 
 @dp.message()
@@ -559,7 +533,6 @@ async def forward(message: types.Message):
         entities = message.entities or []
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
-        logger.info(f"📊 Количество entities: {len(entities)}")
         
         # Форматируем текст
         formatted_text = format_text(text, entities)
@@ -598,14 +571,13 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # ВАЖНО: Форматируем подпись ТОЛЬКО если есть entities
+        # Форматируем подпись
         if message.caption and message.caption_entities:
-            logger.info(f"📝 Форматируем подпись (было): {repr(text)}")
-            logger.info(f"📊 Entities в подписи: {len(message.caption_entities)}")
+            logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
-            logger.info(f"📝 После форматирования: {repr(text)}")
+            logger.info(f"📝 После форматирования: {text[:100]}...")
         elif message.caption:
-            logger.info(f"📝 Подпись без форматирования: {repr(text)}")
+            logger.info(f"📝 Подпись без форматирования: {text[:100]}...")
         else:
             logger.info("📝 Подпись отсутствует")
         
@@ -618,15 +590,14 @@ async def forward(message: types.Message):
         await send_to_max(text, attachments)
         return
     
-    # ========== ЕСЛИ НИ ТЕКСТ, НИ МЕДИА ==========
     logger.warning(f"⚠️ Неподдерживаемый тип сообщения: {message.content_type}")
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ 2.0 (ДИАГНОСТИКА)**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0 (ИСПРАВЛЕННЫЙ)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (UTF-16 форматирование)\n"
+        "• 📝 Текст (только жирный)\n"
         "• 🔘 Кнопки-ссылки\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
@@ -635,7 +606,7 @@ async def start(message: types.Message):
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
         "🔍 Уровень логов: DEBUG\n"
-        "✨ Версия: 2.0 (диагностическая)"
+        "✨ Версия: 2.0 (исправленная)"
     )
 
 @dp.message(Command("stats"))
@@ -657,10 +628,9 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ДИАГНОСТИЧЕСКАЯ) ✨✨✨")
-    logger.info("✅ Исправлено: форматирование текста, работа с UTF-16")
-    logger.info("✅ Текстовые сообщения пересылаются")
-    logger.info("🔍 Уровень логирования: DEBUG (максимальный)")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ИСПРАВЛЕННОЙ) ✨✨✨")
+    logger.info("✅ Форматирование: только жирный текст")
+    logger.info("✅ Добавлены проверки на длину и буквы")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
