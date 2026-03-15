@@ -227,14 +227,12 @@ def build_position_map(text: str) -> tuple:
     """
     telegram_positions = []  # py_idx -> tg_pos
     python_positions = {}    # tg_pos -> py_idx
-    reverse_map = {}         # py_idx -> точная tg_pos
     tg_idx = 0
     
     logger.debug("📊 Построение карты позиций:")
     for py_idx, char in enumerate(text):
         telegram_positions.append(tg_idx)
         python_positions[tg_idx] = py_idx
-        reverse_map[py_idx] = tg_idx
         
         width = get_telegram_char_width(char)
         if width != 1:
@@ -249,16 +247,16 @@ def build_position_map(text: str) -> tuple:
     logger.debug(f"📊 Всего символов в Python: {len(text)}")
     logger.debug(f"📊 Разница: {tg_idx - len(text)}")
     
-    return telegram_positions, python_positions, reverse_map
+    return telegram_positions, python_positions
 
-# === УЛУЧШЕННАЯ ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
+# === ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
 def convert_telegram_to_python(tg_start: int, tg_length: int, 
                                telegram_positions: list, 
                                python_positions: dict,
-                               reverse_map: dict,
                                text_length: int) -> tuple:
     """
-    Конвертирует диапазон из Telegram-позиций в Python-позиции с максимальной точностью.
+    Конвертирует диапазон из Telegram-позиций в Python-позиции.
+    Точно сохраняет исходные границы выделения.
     """
     tg_end = tg_start + tg_length
     
@@ -272,20 +270,17 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
     if py_start is None:
         return None, None
     
-    # Находим Python-позицию для конца с максимальной точностью
+    # Находим Python-позицию для конца
     py_end = None
     
     # Сначала ищем точное совпадение
     if tg_end in python_positions:
         py_end = python_positions[tg_end]
     else:
-        # Ищем ближайшую позицию, которая покрывает tg_end
+        # Ищем ближайшую позицию
         for py_idx in range(py_start, len(telegram_positions)):
-            current_tg = telegram_positions[py_idx]
-            next_tg = telegram_positions[py_idx + 1] if py_idx + 1 < len(telegram_positions) else tg_end + 1
-            
-            if current_tg <= tg_end < next_tg:
-                py_end = py_idx + 1  # Берем следующий символ, чтобы покрыть весь диапазон
+            if telegram_positions[py_idx] >= tg_end:
+                py_end = py_idx
                 break
     
     if py_end is None:
@@ -304,6 +299,7 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
 def format_text(text: str, entities: list) -> str:
     """
     Универсальная функция форматирования с точным учетом позиций.
+    Следует исходной разметке Telegram, не расширяет выделения.
     """
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 УНИВЕРСАЛЬНОЕ ФОРМАТИРОВАНИЕ ТЕКСТА")
@@ -316,7 +312,7 @@ def format_text(text: str, entities: list) -> str:
         return text
     
     # Строим карту позиций
-    telegram_positions, python_positions, reverse_map = build_position_map(text)
+    telegram_positions, python_positions = build_position_map(text)
     
     # Статистика по типам
     type_stats = {}
@@ -332,7 +328,6 @@ def format_text(text: str, entities: list) -> str:
         py_start, py_length = convert_telegram_to_python(
             e.offset, e.length, 
             telegram_positions, python_positions,
-            reverse_map,
             len(text)
         )
         
@@ -342,6 +337,13 @@ def format_text(text: str, entities: list) -> str:
         
         fragment = text[py_start:py_start+py_length]
         logger.debug(f"  ✅ Конвертировано: [Python {py_start}:{py_start+py_length}] '{fragment}'")
+        
+        # Проверяем, не на границе ли слова (просто для информации)
+        if py_start > 0 and (text[py_start-1].isalnum() or text[py_start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+            logger.debug(f"  ⚠️ Выделение начинается с середины слова")
+        
+        if py_start+py_length < len(text) and (text[py_start+py_length].isalnum() or text[py_start+py_length] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+            logger.debug(f"  ⚠️ Выделение заканчивается на середине слова")
         
         # Создаем объект с Python-координатами
         class FixedEntity:
@@ -381,10 +383,10 @@ def format_text(text: str, entities: list) -> str:
         
         # Проверяем, не перекрывается ли с уже примененными
         overlap = False
-        for ar in applied_ranges:
-            if (start >= ar[0] and start < ar[1]) or (end > ar[0] and end <= ar[1]):
+        for ar_start, ar_end in applied_ranges:
+            if (start >= ar_start and start < ar_end) or (end > ar_start and end <= ar_end):
                 overlap = True
-                logger.debug(f"  ⚠️ Перекрывается с диапазоном [{ar[0]}:{ar[1]}]")
+                logger.debug(f"  ⚠️ Перекрывается с диапазоном [{ar_start}:{ar_end}]")
                 break
         
         if overlap:
@@ -441,22 +443,6 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"  📊 Новый диапазон: [{start}:{new_end}]")
     
     formatted_text = ''.join(result)
-    
-    # Финальная проверка - убеждаемся, что теги не разрывают слова
-    import re
-    words = re.finditer(r'\b\w+\b', formatted_text)
-    for word_match in words:
-        word = word_match.group()
-        word_start = word_match.start()
-        word_end = word_match.end()
-        
-        # Проверяем, не разорвано ли слово тегами
-        word_text = formatted_text[word_start:word_end]
-        if '<' in word_text or '>' in word_text:
-            # Проверяем, что теги не разрывают слово
-            clean_word = re.sub(r'<[^>]+>', '', word_text)
-            if clean_word != word_text and len(clean_word) < len(word_text):
-                logger.debug(f"  📝 Слово с форматированием: '{clean_word}'")
     
     logger.debug(f"\n✅ Итоговый текст: {repr(formatted_text[:200])}...")
     return formatted_text
@@ -917,7 +903,7 @@ async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
     logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
-    logger.info("✅ ТОЧНОЕ ОПРЕДЕЛЕНИЕ ГРАНИЦ СЛОВ")
+    logger.info("✅ ТОЧНОЕ СЛЕДОВАНИЕ ИСХОДНОЙ РАЗМЕТКЕ")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
