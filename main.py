@@ -105,11 +105,12 @@ def extract_buttons(message: types.Message) -> list:
 
 # === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
-    """Форматирует жирный текст с защитой от смещения"""
+    """Форматирует жирный текст с обрезкой по границам"""
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
     logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
     logger.debug(f"📊 Всего entities: {len(entities)}")
+    logger.debug(f"📏 Длина текста: {len(text)}")
     
     if not entities:
         logger.debug("❌ Нет entities для форматирования")
@@ -135,15 +136,20 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"📌 Текущая коррекция: {offset_correction}")
         
         start = entity.offset + offset_correction
-        end = start + entity.length
+        # ВАЖНО: обрезаем конец, если выходит за границы
+        end = min(start + entity.length, len(result))
+        actual_length = end - start
+        
         logger.debug(f"📌 Скорректированная позиция: {start} - {end}")
+        logger.debug(f"📌 Реальная длина после обрезки: {actual_length}")
         
         # Проверка границ
         if start >= len(result):
             logger.warning(f"⚠️ start {start} вне текста (длина {len(result)})")
             continue
-        if end > len(result):
-            logger.warning(f"⚠️ end {end} вне текста (длина {len(result)})")
+            
+        if actual_length <= 0:
+            logger.warning(f"⚠️ Длина после обрезки 0")
             continue
             
         fragment = result[start:end]
@@ -595,9 +601,9 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ 2.0 (ИСПРАВЛЕННЫЙ)**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0 (ФИНАЛЬНЫЙ)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (только жирный)\n"
+        "• 📝 Текст (только жирный, с обрезкой)\n"
         "• 🔘 Кнопки-ссылки\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
@@ -606,7 +612,7 @@ async def start(message: types.Message):
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
         "🔍 Уровень логов: DEBUG\n"
-        "✨ Версия: 2.0 (исправленная)"
+        "✨ Версия: 2.0 (финальная)"
     )
 
 @dp.message(Command("stats"))
@@ -628,9 +634,9 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ИСПРАВЛЕННОЙ) ✨✨✨")
-    logger.info("✅ Форматирование: только жирный текст")
-    logger.info("✅ Добавлены проверки на длину и буквы")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ФИНАЛЬНОЙ) ✨✨✨")
+    logger.info("✅ Форматирование: только жирный текст с обрезкой")
+    logger.info("✅ Добавлена защита от выхода за границы")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
