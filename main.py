@@ -105,79 +105,283 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
+# === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ ОПРЕДЕЛЕНИЯ ШИРИНЫ СИМВОЛА В TELEGRAM ===
+def get_telegram_char_width(char: str) -> int:
+    """
+    Универсально определяет, сколько позиций символ занимает в Telegram.
+    Работает для любых эмодзи и спецсимволов автоматически.
+    """
+    char_code = ord(char)
+    
+    # Вариационные селекторы (не занимают места, но влияют на отображение)
+    if 0xFE00 <= char_code <= 0xFE0F:
+        return 0
+    
+    # Суррогатные пары (в Python это 2 символа, в Telegram - 1)
+    if 0xD800 <= char_code <= 0xDFFF:
+        return 1
+    
+    # Проверяем по Unicode-свойствам
+    try:
+        category = unicodedata.category(char)
+        name = unicodedata.name(char, '')
+        
+        # Эмодзи обычно имеют категорию 'So' (Symbol, other)
+        if category == 'So':
+            return 2
+        
+        # Проверяем по ключевым словам в названии
+        emoji_keywords = ['EMOJI', 'FACE', 'FLAG', 'HEART', 'HAND', 'CLOCK', 
+                         'WEATHER', 'ANIMAL', 'FOOD', 'PLANT', 'SPORT', 'CAR',
+                         'HOUSE', 'TOOL', 'NOTE', 'MAIL', 'PHONE', 'COMPUTER']
+        
+        for keyword in emoji_keywords:
+            if keyword in name:
+                return 2
+    except:
+        pass
+    
+    # Диапазоны эмодзи в Unicode
+    emoji_ranges = [
+        (0x1F300, 0x1F9FF),  # Различные символы и эмодзи
+        (0x2600, 0x26FF),    # Разные символы
+        (0x2700, 0x27BF),    # Символы Dingbats
+        (0x1F1E6, 0x1F1FF),  # Флаги
+        (0x1F600, 0x1F64F),  # Смайлики
+        (0x1F680, 0x1F6FF),  # Транспорт
+        (0x1F900, 0x1F9FF),  # Дополнительные символы
+        (0x1FA70, 0x1FAFF),  # Символы для разных целей
+        (0x1F004, 0x1F0CF),  # Игральные карты
+        (0x1F170, 0x1F251),  # Дополнительные символы
+        (0x3297, 0x3299),    # Японские символы
+        (0x00A9, 0x00AE),    # Символы копирайта
+        (0x203C, 0x2049),    # Восклицательные знаки
+        (0x2122, 0x2139),    # Торговая марка
+        (0x2194, 0x2199),    # Стрелки
+        (0x21A9, 0x21AA),    # Стрелки возврата
+        (0x231A, 0x231B),    # Часы
+        (0x2328, 0x23CF),    # Клавиатура и часы
+        (0x23E9, 0x23F3),    # Кнопки и часы
+        (0x23F8, 0x23FA),    # Кнопки управления
+        (0x24C2, 0x25C0),    # Символы
+        (0x25B6, 0x25C0),    # Стрелки воспроизведения
+        (0x25FB, 0x25FE),    # Квадраты
+        (0x2600, 0x2604),    # Погода
+        (0x260E, 0x2615),    # Телефон и чай
+        (0x2618, 0x261D),    # Листья и палец
+        (0x2620, 0x2638),    # Череп и колесо
+        (0x2639, 0x263A),    # Смайлики
+        (0x2640, 0x2642),    # Мужчина/женщина
+        (0x2648, 0x2653),    # Знаки зодиака
+        (0x265F, 0x2668),    # Шахматы и кровать
+        (0x267B, 0x267F),    # Символ переработки
+        (0x2692, 0x2699),    # Инструменты
+        (0x269B, 0x269C),    # Символы
+        (0x26A0, 0x26A1),    # Предупреждение и молния
+        (0x26AA, 0x26AB),    # Круги
+        (0x26B0, 0x26B1),    # Гроб и урна
+        (0x26BD, 0x26BE),    # Футбол и бейсбол
+        (0x26C4, 0x26C5),    # Снеговик и солнце
+        (0x26C8, 0x26CE),    # Молния и машина
+        (0x26CF, 0x26D4),    # Инструменты и знаки
+        (0x26D5, 0x26E9),    # Разное
+        (0x26EA, 0x26F5),    # Места и лодка
+        (0x26F7, 0x26FA),    # Спорт
+        (0x26FD, 0x2705),    # Бутылка и галочка
+        (0x2708, 0x270D),    # Самолет и рука
+        (0x270F, 0x2712),    # Карандаш
+        (0x2714, 0x2716),    # Галочки и кресты
+        (0x271D, 0x2721),    # Кресты
+        (0x2728, 0x2733),    # Звездочки
+        (0x2734, 0x2744),    # Снежинки
+        (0x2747, 0x274E),    # Блестки
+        (0x2753, 0x2757),    # Вопросы и восклицания
+        (0x2763, 0x2764),    # Сердца
+        (0x2795, 0x2797),    # Математические знаки
+        (0x27A1, 0x27B0),    # Стрелки
+        (0x27BF, 0x27BF),    # Стрелка
+        (0x2934, 0x2935),    # Стрелки
+        (0x2B05, 0x2B07),    # Стрелки
+        (0x2B1B, 0x2B1C),    # Квадраты
+        (0x2B50, 0x2B55),    # Звезда и круг
+        (0x3030, 0x303D),    # Символы
+        (0x1F004, 0x1F0CF),  # Маджонг и карты
+    ]
+    
+    for start, end in emoji_ranges:
+        if start <= char_code <= end:
+            return 2
+    
+    # Проверяем, является ли символ "широким" в терминах Unicode
+    if unicodedata.east_asian_width(char) in ('W', 'F'):
+        return 2
+    
+    # По умолчанию - 1 позиция
+    return 1
+
+# === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ ПОСТРОЕНИЯ КАРТЫ ПОЗИЦИЙ ===
+def build_position_map(text: str) -> tuple:
+    """
+    Строит карту соответствия между позициями в Python и Telegram.
+    Возвращает:
+    - telegram_positions: для каждого индекса Python - позиция в Telegram
+    - python_positions: для каждой позиции Telegram - индекс в Python
+    """
+    telegram_positions = []  # py_idx -> tg_pos
+    python_positions = {}    # tg_pos -> py_idx
+    tg_idx = 0
+    
+    logger.debug("📊 Построение карты позиций:")
+    for py_idx, char in enumerate(text):
+        telegram_positions.append(tg_idx)
+        python_positions[tg_idx] = py_idx
+        
+        width = get_telegram_char_width(char)
+        if width != 1:
+            logger.debug(f"  {py_idx}: '{char}' (U+{ord(char):04X}) -> tg_pos={tg_idx}, ширина={width}")
+        
+        tg_idx += width
+    
+    # Добавляем конечную позицию
+    python_positions[tg_idx] = len(text)
+    
+    logger.debug(f"📊 Всего позиций в Telegram: {tg_idx}")
+    logger.debug(f"📊 Всего символов в Python: {len(text)}")
+    logger.debug(f"📊 Разница: {tg_idx - len(text)}")
+    
+    return telegram_positions, python_positions
+
+# === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
+def convert_telegram_to_python(tg_start: int, tg_length: int, 
+                               telegram_positions: list, 
+                               python_positions: dict, 
+                               text_length: int) -> tuple:
+    """
+    Конвертирует диапазон из Telegram-позиций в Python-позиции.
+    Возвращает (py_start, py_length) или (None, None) если ошибка.
+    """
+    tg_end = tg_start + tg_length
+    
+    # Находим Python-позицию для начала
+    py_start = None
+    for py_idx, tg_pos in enumerate(telegram_positions):
+        if tg_pos >= tg_start:
+            py_start = py_idx
+            break
+    
+    if py_start is None:
+        return None, None
+    
+    # Находим Python-позицию для конца
+    py_end = None
+    
+    # Ищем точное совпадение
+    if tg_end in python_positions:
+        py_end = python_positions[tg_end]
+    else:
+        # Ищем ближайшую позицию
+        for py_idx in range(py_start, len(telegram_positions)):
+            if telegram_positions[py_idx] >= tg_end:
+                py_end = py_idx
+                break
+    
+    if py_end is None:
+        py_end = text_length
+    
+    # Проверяем корректность
+    if py_end <= py_start:
+        return None, None
+    
+    if py_end > text_length:
+        py_end = text_length
+    
+    return py_start, py_end - py_start
+
+# === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
     """
-    Форматирует текст, применяя все типы форматирования
-    точно по оригинальным координатам из Telegram
+    Универсальная функция форматирования, которая автоматически
+    учитывает любые эмодзи и спецсимволы в тексте.
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
+    logger.debug(f"🔍 УНИВЕРСАЛЬНОЕ ФОРМАТИРОВАНИЕ ТЕКСТА")
     logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
     logger.debug(f"📊 Всего entities: {len(entities)}")
-    logger.debug(f"📏 Длина текста: {len(text)}")
+    logger.debug(f"📏 Длина текста: {len(text)} символов (Python)")
     
     if not entities:
         logger.debug("❌ Нет entities для форматирования")
         return text
     
-    # Статистика по типам для логов
+    # Строим карту позиций
+    telegram_positions, python_positions = build_position_map(text)
+    
+    # Статистика по типам
     type_stats = {}
     for e in entities:
         type_stats[e.type] = type_stats.get(e.type, 0) + 1
     logger.debug(f"📊 Типы форматирования: {type_stats}")
     
-    # Показываем все оригинальные позиции форматирования и проверяем границы
+    # Конвертируем все entities в Python-координаты
     valid_entities = []
     for i, e in enumerate(entities):
-        # Проверяем, что offset в пределах текста
-        if e.offset >= len(text):
-            logger.warning(f"⚠️ Entity {i} полностью за границами текста (offset {e.offset} >= {len(text)})")
+        logger.debug(f"\nEntity {i}: {e.type} [Telegram {e.offset}:{e.offset+e.length}]")
+        
+        py_start, py_length = convert_telegram_to_python(
+            e.offset, e.length, 
+            telegram_positions, python_positions, 
+            len(text)
+        )
+        
+        if py_start is None:
+            logger.warning(f"  ⚠️ Не удалось конвертировать")
             continue
         
-        # Вычисляем конечную позицию
-        end_pos = e.offset + e.length
+        fragment = text[py_start:py_start+py_length]
+        logger.debug(f"  ✅ Конвертировано: [Python {py_start}:{py_start+py_length}] '{fragment}'")
         
-        # Корректируем, если выходит за границы
-        if end_pos > len(text):
-            logger.warning(f"⚠️ Entity {i} выходит за границы текста: [{e.offset}:{end_pos}] (длина {len(text)})")
-            # Корректируем длину
-            e.length = len(text) - e.offset
-            end_pos = len(text)
-            logger.debug(f"   Корректировка: новая длина {e.length}, новый конец {end_pos}")
+        # Создаем объект с Python-координатами
+        class FixedEntity:
+            pass
         
-        fragment = text[e.offset:end_pos]
-        logger.debug(f"  Entity {i}: {e.type} [{e.offset}:{end_pos}] '{fragment}'")
-        valid_entities.append(e)
+        fixed_e = FixedEntity()
+        fixed_e.type = e.type
+        fixed_e.offset = py_start
+        fixed_e.length = py_length
+        fixed_e.url = getattr(e, 'url', None)
+        
+        valid_entities.append(fixed_e)
     
     if not valid_entities:
-        logger.debug("❌ Нет валидных entities после проверки")
+        logger.debug("❌ Нет валидных entities после конвертации")
         return text
     
-    # Сортируем от КОНЦА к НАЧАЛУ, чтобы не ломать индексы при вставке
-    sorted_entities = sorted(valid_entities, key=lambda e: e.offset + e.length, reverse=True)
+    # Сортируем по offset (от меньшего к большему)
+    sorted_entities = sorted(valid_entities, key=lambda e: e.offset)
+    logger.debug(f"\n📊 Entities после конвертации и сортировки:")
+    for e in sorted_entities:
+        logger.debug(f"  {e.type} [Python {e.offset}:{e.offset+e.length}]")
     
-    # Работаем с текстом как со списком для удобства вставки
+    # Применяем форматирование
     result = list(text)
+    offset_correction = 0
     
     for entity in sorted_entities:
-        start = entity.offset
+        start = entity.offset + offset_correction
         end = start + entity.length
         
-        # Двойная проверка границ
         if start >= len(result) or end > len(result):
-            logger.warning(f"⚠️ Entity выходит за границы после сортировки: [{start}:{end}] (длина {len(result)})")
+            logger.warning(f"⚠️ Entity выходит за границы: [{start}:{end}]")
             continue
         
-        # Получаем фрагмент, который нужно отформатировать
         fragment = ''.join(result[start:end])
         
         logger.debug(f"\n--- Entity [{entity.type}] ---")
-        logger.debug(f"  📍 Оригинальный offset: {start}")
+        logger.debug(f"  📍 Python offset: {entity.offset} -> текущий {start}")
         logger.debug(f"  📏 Длина: {entity.length}")
         logger.debug(f"  📝 Фрагмент: '{fragment}'")
         
-        # Определяем HTML-теги для разных типов форматирования
+        # Определяем HTML-теги
         if entity.type == "bold":
             open_tag, close_tag = '<b>', '</b>'
             logger.debug(f"  🔧 Жирный текст")
@@ -197,31 +401,31 @@ def format_text(text: str, entities: list) -> str:
             open_tag, close_tag = '<pre>', '</pre>'
             logger.debug(f"  🔧 Блок кода")
         elif entity.type == "text_link":
-            # Для ссылок создаем специальный HTML
             url = entity.url
             link_html = f'<a href="{url}">{fragment}</a>'
-            
-            # Заменяем фрагмент на HTML-ссылку
             result[start:end] = list(link_html)
-            logger.debug(f"  🔗 Ссылка: {link_html}")
-            continue  # Переходим к следующему entity
+            len_diff = len(link_html) - (end - start)
+            offset_correction += len_diff
+            logger.debug(f"  🔗 Ссылка добавлена, смещение: {len_diff}")
+            continue
         elif entity.type == "blockquote":
             open_tag, close_tag = '<blockquote>', '</blockquote>'
             logger.debug(f"  🔧 Цитата")
         else:
-            logger.debug(f"  ⏭️ Неподдерживаемый тип: {entity.type}")
+            logger.debug(f"  ⏭️ Пропускаем тип: {entity.type}")
             continue
         
-        # Вставляем закрывающий тег (сначала закрывающий, потому что идем с конца)
+        # Вставляем теги (сначала закрывающий, потом открывающий)
         result[end:end] = list(close_tag)
-        # Вставляем открывающий тег
         result[start:start] = list(open_tag)
         
+        len_diff = len(open_tag) + len(close_tag)
+        offset_correction += len_diff
+        
         logger.debug(f"  ✅ Применено: {open_tag}{fragment}{close_tag}")
+        logger.debug(f"  📊 Общее смещение: {offset_correction}")
     
-    # Собираем результат обратно в строку
     formatted_text = ''.join(result)
-    
     logger.debug(f"\n✅ Итоговый текст: {repr(formatted_text[:200])}...")
     return formatted_text
 
@@ -656,7 +860,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: Исправлено форматирование (проверка границ)"
+        "✨ Версия: УНИВЕРСАЛЬНАЯ (автоопределение эмодзи)"
     )
 
 @dp.message(Command("stats"))
@@ -680,7 +884,7 @@ async def cleanup():
 async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
-    logger.info("✅ Проверка границ entities (ИСПРАВЛЕНО)")
+    logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
