@@ -103,9 +103,9 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ (HTML) ===
+# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
-    """Форматирует жирный текст с HTML-тегами"""
+    """Форматирует жирный текст с поиском границ предложений"""
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА (HTML)")
     logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
@@ -136,11 +136,32 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"📌 Текущая коррекция: {offset_correction}")
         
         start = entity.offset + offset_correction
-        end = min(start + entity.length, len(result))
+        
+        # ИЩЕМ НАЧАЛО ПРЕДЛОЖЕНИЯ
+        sentence_start = start
+        while sentence_start > 0:
+            if result[sentence_start-1] in '.!?\n':
+                break
+            sentence_start -= 1
+        
+        # ИЩЕМ КОНЕЦ ПРЕДЛОЖЕНИЯ
+        sentence_end = start + entity.length
+        while sentence_end < len(result):
+            if result[sentence_end] in '.!?\n':
+                sentence_end += 1
+                break
+            sentence_end += 1
+        
+        logger.debug(f"📌 Исходный фрагмент: {start} - {start + entity.length}")
+        logger.debug(f"📌 Границы предложения: {sentence_start} - {sentence_end}")
+        
+        # Используем полное предложение
+        start = sentence_start
+        end = min(sentence_end, len(result))
         actual_length = end - start
         
-        logger.debug(f"📌 Скорректированная позиция: {start} - {end}")
-        logger.debug(f"📌 Реальная длина после обрезки: {actual_length}")
+        logger.debug(f"📌 Финальная позиция: {start} - {end}")
+        logger.debug(f"📌 Длина: {actual_length}")
         
         if start >= len(result):
             logger.warning(f"⚠️ start {start} вне текста")
@@ -159,13 +180,13 @@ def format_text(text: str, entities: list) -> str:
             continue
         
         # Проверка на длину
-        if len(fragment.strip()) < 2:
+        if len(fragment.strip()) < 5:  # Минимум 5 символов
             logger.debug("⏭️ Пропускаем - слишком короткий")
             continue
         
-        # Заменяем на HTML-теги вместо Markdown
+        # Заменяем на HTML-теги
         replacement = f"<b>{fragment}</b>"
-        logger.debug(f"🔧 Замена (HTML): '{fragment}' -> '{replacement}'")
+        logger.debug(f"🔧 Замена: '{fragment}' -> '{replacement}'")
         
         result = result[:start] + replacement + result[end:]
         len_diff = len(replacement) - len(fragment)
@@ -381,10 +402,9 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         "Content-Type": "application/json"
     }
     
-    # ПРОБУЕМ HTML ВМЕСТО MARKDOWN
     data = {
         "text": text or " ",
-        "format": "html"  # ИЗМЕНЕНО!
+        "format": "html"  # HTML вместо Markdown
     }
     
     if attachments:
@@ -596,9 +616,9 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ 2.0 (HTML)**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0 (ФИНАЛЬНЫЙ)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (HTML-форматирование)\n"
+        "• 📝 Текст (HTML с поиском предложений)\n"
         "• 🔘 Кнопки-ссылки\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
@@ -607,7 +627,7 @@ async def start(message: types.Message):
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
         "🔍 Уровень логов: DEBUG\n"
-        "✨ Версия: 2.0 (HTML)"
+        "✨ Версия: 2.0 (финальная)"
     )
 
 @dp.message(Command("stats"))
@@ -629,8 +649,8 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (HTML) ✨✨✨")
-    logger.info("✅ Форматирование: HTML-теги <b> вместо Markdown")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ФИНАЛЬНОЙ) ✨✨✨")
+    logger.info("✅ Форматирование: HTML с поиском предложений")
     logger.info("✅ Добавлена защита от выхода за границы")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
