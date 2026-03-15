@@ -295,11 +295,22 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
     
     return py_start, py_end - py_start
 
+# === СЛОВАРЬ ТЕГОВ ДЛЯ ВСЕХ ТИПОВ ФОРМАТИРОВАНИЯ ===
+HTML_TAGS = {
+    "bold": ("<b>", "</b>"),
+    "italic": ("<i>", "</i>"),
+    "underline": ("<u>", "</u>"),
+    "strikethrough": ("<s>", "</s>"),
+    "code": ("<code>", "</code>"),
+    "pre": ("<pre>", "</pre>"),
+    "blockquote": ("<blockquote>", "</blockquote>"),
+    "text_link": None,  # обрабатывается отдельно
+}
+
 # === УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
     """
-    Универсальная функция форматирования с точным учетом позиций.
-    Следует исходной разметке Telegram, не расширяет выделения.
+    Универсальная функция форматирования с поддержкой всех типов одновременно.
     """
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 УНИВЕРСАЛЬНОЕ ФОРМАТИРОВАНИЕ ТЕКСТА")
@@ -338,13 +349,6 @@ def format_text(text: str, entities: list) -> str:
         fragment = text[py_start:py_start+py_length]
         logger.debug(f"  ✅ Конвертировано: [Python {py_start}:{py_start+py_length}] '{fragment}'")
         
-        # Проверяем, не на границе ли слова (просто для информации)
-        if py_start > 0 and (text[py_start-1].isalnum() or text[py_start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
-            logger.debug(f"  ⚠️ Выделение начинается с середины слова")
-        
-        if py_start+py_length < len(text) and (text[py_start+py_length].isalnum() or text[py_start+py_length] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
-            logger.debug(f"  ⚠️ Выделение заканчивается на середине слова")
-        
         # Создаем объект с Python-координатами
         class FixedEntity:
             pass
@@ -361,10 +365,9 @@ def format_text(text: str, entities: list) -> str:
         logger.debug("❌ Нет валидных entities после проверки")
         return text
     
-    # ВАЖНО: Сортируем по offset (от меньшего к большему)
-    # Это гарантирует правильный порядок обработки
+    # Сортируем по offset (от меньшего к большему)
     sorted_entities = sorted(valid_entities, key=lambda e: e.offset)
-    logger.debug(f"\n📊 Entities после конвертации и сортировки (по offset):")
+    logger.debug(f"\n📊 Entities после конвертации и сортировки:")
     for e in sorted_entities:
         fragment = text[e.offset:e.offset+e.length]
         logger.debug(f"  {e.type} [Python {e.offset}:{e.offset+e.length}] '{fragment[:50]}...'")
@@ -372,7 +375,7 @@ def format_text(text: str, entities: list) -> str:
     # Применяем форматирование
     result = list(text)
     offset_correction = 0
-    applied_ranges = []  # Для отслеживания уже примененных диапазонов
+    applied_ranges = []  # (start, end, type)
     
     for entity in sorted_entities:
         start = entity.offset + offset_correction
@@ -382,17 +385,27 @@ def format_text(text: str, entities: list) -> str:
             logger.warning(f"⚠️ Entity выходит за границы: [{start}:{end}]")
             continue
         
-        # Проверяем, не перекрывается ли с уже примененными
-        overlap = False
-        for ar_start, ar_end in applied_ranges:
-            if (start >= ar_start and start < ar_end) or (end > ar_start and end <= ar_end):
-                overlap = True
-                logger.debug(f"  ⚠️ Перекрывается с диапазоном [{ar_start}:{ar_end}]")
+        # Проверяем перекрытия - разрешаем любые вложенные теги
+        can_apply = True
+        nested_formats = []
+        
+        for ar_start, ar_end, ar_type in applied_ranges:
+            if start >= ar_start and end <= ar_end:
+                # Полностью внутри - можно добавлять вложенный тег любого типа
+                nested_formats.append(ar_type)
+                continue
+            elif (start >= ar_start and start < ar_end) or (end > ar_start and end <= ar_end):
+                # Частичное перекрытие - нельзя для любого типа
+                logger.debug(f"  ⚠️ Частично перекрывается с {ar_type} [{ar_start}:{ar_end}]")
+                can_apply = False
                 break
         
-        if overlap:
-            logger.debug(f"  ⏭️ Пропускаем из-за перекрытия")
+        if not can_apply:
+            logger.debug(f"  ⏭️ Пропускаем из-за частичного перекрытия")
             continue
+        
+        if nested_formats:
+            logger.debug(f"  📦 Будет вложено в: {', '.join(nested_formats)}")
         
         fragment = ''.join(result[start:end])
         
@@ -401,52 +414,54 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"  📏 Длина: {entity.length}")
         logger.debug(f"  📝 Фрагмент: '{fragment}'")
         
-        # Определяем HTML-теги
-        if entity.type == "bold":
-            open_tag, close_tag = '<b>', '</b>'
-            logger.debug(f"  🔧 Жирный текст")
-        elif entity.type == "italic":
-            open_tag, close_tag = '<i>', '</i>'
-            logger.debug(f"  🔧 Курсив")
-        elif entity.type == "underline":
-            open_tag, close_tag = '<u>', '</u>'
-        elif entity.type == "strikethrough":
-            open_tag, close_tag = '<s>', '</s>'
-        elif entity.type == "code":
-            open_tag, close_tag = '<code>', '</code>'
-        elif entity.type == "pre":
-            open_tag, close_tag = '<pre>', '</pre>'
-        elif entity.type == "text_link":
+        # Обрабатываем ссылки отдельно
+        if entity.type == "text_link":
             url = entity.url
             link_html = f'<a href="{url}">{fragment}</a>'
             result[start:end] = list(link_html)
             new_end = start + len(link_html)
-            applied_ranges.append((start, new_end))
+            applied_ranges.append((start, new_end, entity.type))
             offset_correction += len(link_html) - (end - start)
             logger.debug(f"  🔗 Ссылка добавлена")
             continue
-        elif entity.type == "blockquote":
-            open_tag, close_tag = '<blockquote>', '</blockquote>'
+        
+        # Для всех остальных типов форматирования
+        if entity.type in HTML_TAGS:
+            open_tag, close_tag = HTML_TAGS[entity.type]
+            logger.debug(f"  🔧 Применяем {entity.type}")
+            
+            # Вставляем теги
+            result[end:end] = list(close_tag)
+            result[start:start] = list(open_tag)
+            
+            new_end = end + len(open_tag) + len(close_tag)
+            applied_ranges.append((start, new_end, entity.type))
+            
+            len_diff = len(open_tag) + len(close_tag)
+            offset_correction += len_diff
+            
+            # Показываем итоговую комбинацию
+            all_formats = nested_formats + [entity.type]
+            logger.debug(f"  ✅ Применено: {open_tag}{fragment}{close_tag}")
+            logger.debug(f"  📊 Комбинация: {'+'.join(all_formats)}")
+            logger.debug(f"  📊 Новый диапазон: [{start}:{new_end}] ({entity.type})")
         else:
-            logger.debug(f"  ⏭️ Пропускаем тип: {entity.type}")
-            continue
-        
-        # Вставляем теги
-        result[end:end] = list(close_tag)
-        result[start:start] = list(open_tag)
-        
-        new_end = end + len(open_tag) + len(close_tag)
-        applied_ranges.append((start, new_end))
-        
-        len_diff = len(open_tag) + len(close_tag)
-        offset_correction += len_diff
-        
-        logger.debug(f"  ✅ Применено: {open_tag}{fragment}{close_tag}")
-        logger.debug(f"  📊 Новый диапазон: [{start}:{new_end}]")
+            logger.debug(f"  ⏭️ Неподдерживаемый тип: {entity.type}")
     
     formatted_text = ''.join(result)
     
+    # Финальная проверка парности тегов
     logger.debug(f"\n✅ Итоговый текст: {repr(formatted_text[:200])}...")
+    
+    # Проверяем все типы тегов
+    for tag_name in HTML_TAGS.keys():
+        if tag_name == "text_link":
+            continue
+        open_tag = HTML_TAGS[tag_name][0]
+        close_tag = HTML_TAGS[tag_name][1]
+        if formatted_text.count(open_tag) != formatted_text.count(close_tag):
+            logger.warning(f"⚠️ Непарные {tag_name} теги: {formatted_text.count(open_tag)} vs {formatted_text.count(close_tag)}")
+    
     return formatted_text
 
 class MediaUploader:
@@ -880,7 +895,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: УНИВЕРСАЛЬНАЯ (точный подсчет эмодзи)"
+        "✨ Версия: УНИВЕРСАЛЬНАЯ (все форматы одновременно)"
     )
 
 @dp.message(Command("stats"))
@@ -906,7 +921,7 @@ async def main():
     logger.info("✅ Поддержка всех типов форматирования")
     logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
     logger.info("✅ ТОЧНОЕ СЛЕДОВАНИЕ ИСХОДНОЙ РАЗМЕТКЕ")
-    logger.info("✅ ПРАВИЛЬНАЯ СОРТИРОВКА ПО OFFSET")
+    logger.info("✅ ВСЕ ФОРМАТЫ МОГУТ ПРИМЕНЯТЬСЯ ОДНОВРЕМЕННО")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
