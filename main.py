@@ -103,11 +103,11 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ФИНАЛЬНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
+# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
     """
     Форматирует текст, применяя все типы форматирования
-    точно по координатам из Telegram
+    точно по оригинальным координатам из Telegram
     """
     logger.debug(f"\n{'='*60}")
     logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
@@ -125,76 +125,81 @@ def format_text(text: str, entities: list) -> str:
         type_stats[e.type] = type_stats.get(e.type, 0) + 1
     logger.debug(f"📊 Типы форматирования: {type_stats}")
     
-    # Сортируем от конца к началу
-    sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
-    result = text
-    offset_correction = 0
+    # Показываем все оригинальные позиции форматирования
+    for i, e in enumerate(entities):
+        fragment = text[e.offset:e.offset+e.length]
+        logger.debug(f"  Entity {i}: {e.type} [{e.offset}:{e.offset+e.length}] '{fragment}'")
     
-    for idx, entity in enumerate(sorted_entities):
-        logger.debug(f"\n--- Entity {idx+1} [type: {entity.type}] ---")
-        logger.debug(f"📌 Оригинальный offset: {entity.offset}")
-        logger.debug(f"📌 Длина: {entity.length}")
-        logger.debug(f"📌 Текущая коррекция: {offset_correction}")
-        
-        start = entity.offset + offset_correction
+    # Сортируем от КОНЦА к НАЧАЛУ, чтобы не ломать индексы при вставке
+    sorted_entities = sorted(entities, key=lambda e: e.offset + e.length, reverse=True)
+    
+    # Работаем с текстом как со списком для удобства вставки
+    result = list(text)
+    
+    for entity in sorted_entities:
+        start = entity.offset
         end = start + entity.length
         
-        # Проверка границ
-        if start >= len(result):
-            logger.warning(f"⚠️ start {start} вне текста (длина {len(result)})")
+        # Проверяем границы
+        if start >= len(result) or end > len(result):
+            logger.warning(f"⚠️ Entity выходит за границы текста: [{start}:{end}] (длина текста {len(result)})")
             continue
-            
-        if end > len(result):
-            logger.debug(f"📌 end обрезан с {end} до {len(result)}")
-            end = len(result)
         
-        if end <= start:
-            logger.warning(f"⚠️ Длина после обрезки 0")
-            continue
-            
-        fragment = result[start:end]
-        logger.debug(f"📌 Фрагмент: '{fragment}'")
+        # Получаем фрагмент, который нужно отформатировать
+        fragment = ''.join(result[start:end])
         
-        # Применяем форматирование в зависимости от типа
+        logger.debug(f"\n--- Entity [{entity.type}] ---")
+        logger.debug(f"  📍 Оригинальный offset: {start}")
+        logger.debug(f"  📏 Оригинальная длина: {entity.length}")
+        logger.debug(f"  📝 Фрагмент: '{fragment}'")
+        
+        # Определяем HTML-теги для разных типов форматирования
         if entity.type == "bold":
-            replacement = f"<b>{fragment}</b>"
-            logger.debug(f"🔧 Жирный текст")
+            open_tag, close_tag = '<b>', '</b>'
+            logger.debug(f"  🔧 Жирный текст")
         elif entity.type == "italic":
-            replacement = f"<i>{fragment}</i>"
-            logger.debug(f"🔧 Курсив")
+            open_tag, close_tag = '<i>', '</i>'
+            logger.debug(f"  🔧 Курсив")
         elif entity.type == "underline":
-            replacement = f"<u>{fragment}</u>"
-            logger.debug(f"🔧 Подчеркнутый")
+            open_tag, close_tag = '<u>', '</u>'
+            logger.debug(f"  🔧 Подчеркнутый")
         elif entity.type == "strikethrough":
-            replacement = f"<s>{fragment}</s>"
-            logger.debug(f"🔧 Зачеркнутый")
+            open_tag, close_tag = '<s>', '</s>'
+            logger.debug(f"  🔧 Зачеркнутый")
         elif entity.type == "code":
-            replacement = f"<code>{fragment}</code>"
-            logger.debug(f"🔧 Моноширинный")
+            open_tag, close_tag = '<code>', '</code>'
+            logger.debug(f"  🔧 Моноширинный")
         elif entity.type == "pre":
-            replacement = f"<pre>{fragment}</pre>"
-            logger.debug(f"🔧 Блок кода")
+            open_tag, close_tag = '<pre>', '</pre>'
+            logger.debug(f"  🔧 Блок кода")
         elif entity.type == "text_link":
-            replacement = f"<a href='{entity.url}'>{fragment}</a>"
-            logger.debug(f"🔧 Ссылка: {entity.url}")
+            # Для ссылок создаем специальный HTML
+            url = entity.url
+            link_html = f'<a href="{url}">{fragment}</a>'
+            
+            # Заменяем фрагмент на HTML-ссылку
+            result[start:end] = list(link_html)
+            logger.debug(f"  🔗 Ссылка: {link_html}")
+            continue  # Переходим к следующему entity
         elif entity.type == "blockquote":
-            replacement = f"<blockquote>{fragment}</blockquote>"
-            logger.debug(f"🔧 Цитата")
+            open_tag, close_tag = '<blockquote>', '</blockquote>'
+            logger.debug(f"  🔧 Цитата")
         else:
-            logger.debug(f"⏭️ Неподдерживаемый тип: {entity.type}")
+            logger.debug(f"  ⏭️ Неподдерживаемый тип: {entity.type}")
             continue
         
-        logger.debug(f"📌 Замена: '{fragment}' -> '{replacement}'")
+        # Вставляем закрывающий тег (сначала закрывающий, потому что идем с конца)
+        result[end:end] = list(close_tag)
+        # Вставляем открывающий тег
+        result[start:start] = list(open_tag)
         
-        # Заменяем в тексте
-        result = result[:start] + replacement + result[end:]
-        len_diff = len(replacement) - len(fragment)
-        offset_correction += len_diff
-        logger.debug(f"📊 Изменение длины: {len_diff}")
-        logger.debug(f"📊 Новая коррекция: {offset_correction}")
+        logger.debug(f"  ✅ Применено: {open_tag}{fragment}{close_tag}")
     
-    logger.debug(f"\n✅ Итоговый текст: {repr(result[:200])}...")
-    return result
+    # Собираем результат обратно в строку
+    formatted_text = ''.join(result)
+    
+    logger.debug(f"\n✅ Итоговый текст: {repr(formatted_text[:200])}...")
+    return formatted_text
 
 class MediaUploader:
     """Загрузчик медиа"""
@@ -554,7 +559,7 @@ async def forward(message: types.Message):
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Форматируем текст
+        # Форматируем текст с оригинальными позициями
         formatted_text = format_text(text, entities)
         logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
@@ -591,7 +596,7 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Форматируем подпись
+        # Форматируем подпись с оригинальными позициями
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
@@ -627,7 +632,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: Универсальная (все типы форматирования)"
+        "✨ Версия: Исправлено форматирование (точные координаты из Telegram)"
     )
 
 @dp.message(Command("stats"))
@@ -651,7 +656,7 @@ async def cleanup():
 async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
-    logger.info("✅ Точные координаты из Telegram")
+    logger.info("✅ Точные координаты из Telegram (ИСПРАВЛЕНО)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
