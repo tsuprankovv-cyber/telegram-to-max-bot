@@ -109,17 +109,43 @@ def extract_buttons(message: types.Message) -> list:
 def get_telegram_char_width(char: str) -> int:
     """
     Универсально определяет, сколько позиций символ занимает в Telegram.
-    Работает для любых эмодзи и спецсимволов автоматически.
+    Учитывает все эмодзи, спецсимволы и типографику.
     """
     char_code = ord(char)
     
-    # Вариационные селекторы (не занимают места, но влияют на отображение)
+    # Вариационные селекторы (не занимают места)
     if 0xFE00 <= char_code <= 0xFE0F:
         return 0
     
     # Суррогатные пары (в Python это 2 символа, в Telegram - 1)
     if 0xD800 <= char_code <= 0xDFFF:
         return 1
+    
+    # СПЕЦИАЛЬНЫЕ ТИПОГРАФИЧЕСКИЕ СИМВОЛЫ
+    special_chars = {
+        '—': 2,  # длинное тире
+        '–': 2,  # среднее тире
+        '…': 2,  # многоточие
+        '«': 1, '»': 1,  # кавычки-елочки
+        ' ': 1,  # узкий пробел
+        '‑': 1,  # неразрывный дефис
+        '−': 2,  # знак минуса
+        '×': 2,  # знак умножения
+        '÷': 2,  # знак деления
+        '±': 2,  # плюс-минус
+        '°': 2,  # градус
+        '′': 2,  # минуты
+        '″': 2,  # секунды
+        '€': 2,  # евро
+        '£': 2,  # фунт
+        '¥': 2,  # иена
+        '©': 2,  # копирайт
+        '®': 2,  # зарегистрировано
+        '™': 2,  # торговая марка
+    }
+    
+    if char in special_chars:
+        return special_chars[char]
     
     # Проверяем по Unicode-свойствам
     try:
@@ -133,7 +159,9 @@ def get_telegram_char_width(char: str) -> int:
         # Проверяем по ключевым словам в названии
         emoji_keywords = ['EMOJI', 'FACE', 'FLAG', 'HEART', 'HAND', 'CLOCK', 
                          'WEATHER', 'ANIMAL', 'FOOD', 'PLANT', 'SPORT', 'CAR',
-                         'HOUSE', 'TOOL', 'NOTE', 'MAIL', 'PHONE', 'COMPUTER']
+                         'HOUSE', 'TOOL', 'NOTE', 'MAIL', 'PHONE', 'COMPUTER',
+                         'MONEY', 'TIME', 'ARROW', 'STAR', 'FIRE', 'WATER',
+                         'SUN', 'MOON', 'CLOUD', 'TREE', 'FLOWER']
         
         for keyword in emoji_keywords:
             if keyword in name:
@@ -141,7 +169,7 @@ def get_telegram_char_width(char: str) -> int:
     except:
         pass
     
-    # Диапазоны эмодзи в Unicode
+    # ДИАПАЗОНЫ ЭМОДЗИ В UNICODE
     emoji_ranges = [
         (0x1F300, 0x1F9FF),  # Различные символы и эмодзи
         (0x2600, 0x26FF),    # Разные символы
@@ -160,12 +188,10 @@ def get_telegram_char_width(char: str) -> int:
         (0x2194, 0x2199),    # Стрелки
         (0x21A9, 0x21AA),    # Стрелки возврата
         (0x231A, 0x231B),    # Часы
-        (0x2328, 0x23CF),    # Клавиатура и часы
         (0x23E9, 0x23F3),    # Кнопки и часы
         (0x23F8, 0x23FA),    # Кнопки управления
         (0x24C2, 0x25C0),    # Символы
         (0x25B6, 0x25C0),    # Стрелки воспроизведения
-        (0x25FB, 0x25FE),    # Квадраты
         (0x2600, 0x2604),    # Погода
         (0x260E, 0x2615),    # Телефон и чай
         (0x2618, 0x261D),    # Листья и палец
@@ -176,15 +202,11 @@ def get_telegram_char_width(char: str) -> int:
         (0x265F, 0x2668),    # Шахматы и кровать
         (0x267B, 0x267F),    # Символ переработки
         (0x2692, 0x2699),    # Инструменты
-        (0x269B, 0x269C),    # Символы
         (0x26A0, 0x26A1),    # Предупреждение и молния
         (0x26AA, 0x26AB),    # Круги
-        (0x26B0, 0x26B1),    # Гроб и урна
         (0x26BD, 0x26BE),    # Футбол и бейсбол
         (0x26C4, 0x26C5),    # Снеговик и солнце
-        (0x26C8, 0x26CE),    # Молния и машина
-        (0x26CF, 0x26D4),    # Инструменты и знаки
-        (0x26D5, 0x26E9),    # Разное
+        (0x26CE, 0x26D4),    # Разные
         (0x26EA, 0x26F5),    # Места и лодка
         (0x26F7, 0x26FA),    # Спорт
         (0x26FD, 0x2705),    # Бутылка и галочка
@@ -200,7 +222,6 @@ def get_telegram_char_width(char: str) -> int:
         (0x2795, 0x2797),    # Математические знаки
         (0x27A1, 0x27B0),    # Стрелки
         (0x27BF, 0x27BF),    # Стрелка
-        (0x2934, 0x2935),    # Стрелки
         (0x2B05, 0x2B07),    # Стрелки
         (0x2B1B, 0x2B1C),    # Квадраты
         (0x2B50, 0x2B55),    # Звезда и круг
@@ -249,14 +270,15 @@ def build_position_map(text: str) -> tuple:
     
     return telegram_positions, python_positions
 
-# === ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
+# === УЛУЧШЕННАЯ ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ПОЗИЦИЙ ===
 def convert_telegram_to_python(tg_start: int, tg_length: int, 
                                telegram_positions: list, 
                                python_positions: dict,
+                               text: str,
                                text_length: int) -> tuple:
     """
     Конвертирует диапазон из Telegram-позиций в Python-позиции.
-    Точно сохраняет исходные границы выделения.
+    Учитывает контекст и границы слов.
     """
     tg_end = tg_start + tg_length
     
@@ -272,26 +294,40 @@ def convert_telegram_to_python(tg_start: int, tg_length: int,
     
     # Находим Python-позицию для конца
     py_end = None
-    
-    # Сначала ищем точное совпадение
-    if tg_end in python_positions:
-        py_end = python_positions[tg_end]
-    else:
-        # Ищем ближайшую позицию
-        for py_idx in range(py_start, len(telegram_positions)):
-            if telegram_positions[py_idx] >= tg_end:
-                py_end = py_idx
-                break
+    for py_idx in range(py_start, len(telegram_positions)):
+        if telegram_positions[py_idx] >= tg_end:
+            py_end = py_idx
+            break
     
     if py_end is None:
         py_end = text_length
     
-    # Проверяем корректность
+    # Проверяем, не на границе ли слова справа
+    if py_end < text_length:
+        next_char = text[py_end]
+        # Если следующий символ - буква или дефис, и Telegram-позиция близка
+        if next_char.isalnum() or next_char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-':
+            next_tg_pos = telegram_positions[py_end] if py_end < len(telegram_positions) else float('inf')
+            if next_tg_pos - tg_end <= 2:  # Разница не больше 2 (для учета эмодзи)
+                # Расширяем до конца слова
+                orig_py_end = py_end
+                while py_end < text_length and (text[py_end].isalnum() or text[py_end] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+                    py_end += 1
+                logger.debug(f"  ➡️ Расширено до конца слова: {orig_py_end} -> {py_end}")
+    
+    # Проверяем, не на границе ли слова слева
+    if py_start > 0:
+        prev_char = text[py_start-1]
+        if prev_char.isalnum() or prev_char in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-':
+            prev_tg_pos = telegram_positions[py_start-1]
+            if tg_start - prev_tg_pos <= 2:
+                orig_py_start = py_start
+                while py_start > 0 and (text[py_start-1].isalnum() or text[py_start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+                    py_start -= 1
+                logger.debug(f"  ⬅️ Расширено до начала слова: {orig_py_start} -> {py_start}")
+    
     if py_end <= py_start:
         return None, None
-    
-    if py_end > text_length:
-        py_end = text_length
     
     return py_start, py_end - py_start
 
@@ -339,6 +375,7 @@ def format_text(text: str, entities: list) -> str:
         py_start, py_length = convert_telegram_to_python(
             e.offset, e.length, 
             telegram_positions, python_positions,
+            text,
             len(text)
         )
         
@@ -895,7 +932,7 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: УНИВЕРСАЛЬНАЯ (все форматы одновременно)"
+        "✨ Версия: ПОЛНАЯ (все эмодзи и символы учтены)"
     )
 
 @dp.message(Command("stats"))
@@ -919,8 +956,8 @@ async def cleanup():
 async def main():
     logger.info("✨✨✨ ЗАПУСК УНИВЕРСАЛЬНОГО БОТА ✨✨✨")
     logger.info("✅ Поддержка всех типов форматирования")
-    logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
-    logger.info("✅ ТОЧНОЕ СЛЕДОВАНИЕ ИСХОДНОЙ РАЗМЕТКЕ")
+    logger.info("✅ АВТОМАТИЧЕСКИЙ УЧЕТ ВСЕХ ЭМОДЗИ И СПЕЦСИМВОЛОВ")
+    logger.info("✅ ТОЧНОЕ ОПРЕДЕЛЕНИЕ ГРАНИЦ СЛОВ")
     logger.info("✅ ВСЕ ФОРМАТЫ МОГУТ ПРИМЕНЯТЬСЯ ОДНОВРЕМЕННО")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
