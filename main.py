@@ -103,11 +103,11 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
+# === ИСПРАВЛЕННАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ (HTML) ===
 def format_text(text: str, entities: list) -> str:
-    """Форматирует жирный текст с обрезкой по границам"""
+    """Форматирует жирный текст с HTML-тегами"""
     logger.debug(f"\n{'='*60}")
-    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
+    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА (HTML)")
     logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
     logger.debug(f"📊 Всего entities: {len(entities)}")
     logger.debug(f"📏 Длина текста: {len(text)}")
@@ -136,16 +136,14 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"📌 Текущая коррекция: {offset_correction}")
         
         start = entity.offset + offset_correction
-        # ВАЖНО: обрезаем конец, если выходит за границы
         end = min(start + entity.length, len(result))
         actual_length = end - start
         
         logger.debug(f"📌 Скорректированная позиция: {start} - {end}")
         logger.debug(f"📌 Реальная длина после обрезки: {actual_length}")
         
-        # Проверка границ
         if start >= len(result):
-            logger.warning(f"⚠️ start {start} вне текста (длина {len(result)})")
+            logger.warning(f"⚠️ start {start} вне текста")
             continue
             
         if actual_length <= 0:
@@ -156,22 +154,18 @@ def format_text(text: str, entities: list) -> str:
         logger.debug(f"📌 Фрагмент: '{fragment}'")
         
         # Проверка на наличие букв
-        has_letters = any(c.isalpha() for c in fragment)
-        logger.debug(f"📌 Есть буквы: {has_letters}")
-        
-        if not has_letters:
+        if not any(c.isalpha() for c in fragment):
             logger.debug("⏭️ Пропускаем - нет букв")
             continue
         
         # Проверка на длину
-        stripped = fragment.strip()
-        if len(stripped) < 2:
+        if len(fragment.strip()) < 2:
             logger.debug("⏭️ Пропускаем - слишком короткий")
             continue
         
-        # Заменяем
-        replacement = f"**{fragment}**"
-        logger.debug(f"🔧 Замена: '{fragment}' -> '{replacement}'")
+        # Заменяем на HTML-теги вместо Markdown
+        replacement = f"<b>{fragment}</b>"
+        logger.debug(f"🔧 Замена (HTML): '{fragment}' -> '{replacement}'")
         
         result = result[:start] + replacement + result[end:]
         len_diff = len(replacement) - len(fragment)
@@ -387,9 +381,10 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         "Content-Type": "application/json"
     }
     
+    # ПРОБУЕМ HTML ВМЕСТО MARKDOWN
     data = {
         "text": text or " ",
-        "format": "markdown"
+        "format": "html"  # ИЗМЕНЕНО!
     }
     
     if attachments:
@@ -542,7 +537,7 @@ async def forward(message: types.Message):
         
         # Форматируем текст
         formatted_text = format_text(text, entities)
-        logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
+        logger.info(f"📝 Текст после форматирования (HTML): {formatted_text[:100]}...")
         
         # Добавляем кнопки если есть
         attachments = []
@@ -581,7 +576,7 @@ async def forward(message: types.Message):
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
-            logger.info(f"📝 После форматирования: {text[:100]}...")
+            logger.info(f"📝 После форматирования (HTML): {text[:100]}...")
         elif message.caption:
             logger.info(f"📝 Подпись без форматирования: {text[:100]}...")
         else:
@@ -601,9 +596,9 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ 2.0 (ФИНАЛЬНЫЙ)**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0 (HTML)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (только жирный, с обрезкой)\n"
+        "• 📝 Текст (HTML-форматирование)\n"
         "• 🔘 Кнопки-ссылки\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
@@ -612,7 +607,7 @@ async def start(message: types.Message):
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
         "🔍 Уровень логов: DEBUG\n"
-        "✨ Версия: 2.0 (финальная)"
+        "✨ Версия: 2.0 (HTML)"
     )
 
 @dp.message(Command("stats"))
@@ -634,8 +629,8 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ФИНАЛЬНОЙ) ✨✨✨")
-    logger.info("✅ Форматирование: только жирный текст с обрезкой")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (HTML) ✨✨✨")
+    logger.info("✅ Форматирование: HTML-теги <b> вместо Markdown")
     logger.info("✅ Добавлена защита от выхода за границы")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
