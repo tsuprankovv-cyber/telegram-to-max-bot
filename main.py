@@ -9,9 +9,9 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from typing import List, Tuple, Optional
 
-# === НАСТРОЙКА ЛОГИРОВАНИЯ ===
+# === НАСТРОЙКА МАКСИМАЛЬНОГО ЛОГИРОВАНИЯ ===
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -118,27 +118,45 @@ def utf16_slice(text: str, start: int, length: int) -> str:
 # === ТЕКСТОВЫЕ ФУНКЦИИ С UTF-16 ПОДДЕРЖКОЙ ===
 def format_text(text: str, entities: list) -> str:
     """Форматирует текст с учетом UTF-16 смещений"""
+    logger.debug(f"\n{'='*60}")
+    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ ТЕКСТА")
+    logger.debug(f"📝 Исходный текст: {repr(text)}")
+    logger.debug(f"📊 Всего entities: {len(entities)}")
+    
     if not entities:
+        logger.debug("❌ Нет entities для форматирования")
         return text
     
     # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+    logger.debug(f"📌 Сортировка entities от конца к началу")
+    
     result = text
     offset_correction = 0
     
-    for entity in sorted_entities:
+    for idx, entity in enumerate(sorted_entities):
+        logger.debug(f"\n--- Entity {idx+1} ---")
+        logger.debug(f"📌 Тип: {entity.type}")
+        logger.debug(f"📌 Оригинальный offset: {entity.offset}")
+        logger.debug(f"📌 Длина: {entity.length}")
+        logger.debug(f"📌 offset_correction: {offset_correction}")
+        
         # Корректируем позицию с учетом UTF-16
         start = entity.offset + offset_correction
+        logger.debug(f"📌 Скорректированная позиция start: {start}")
         
         # Получаем фрагмент с учетом UTF-16
         try:
             fragment = utf16_slice(result, start, entity.length)
-        except:
-            # Если UTF-16 не сработал, пробуем обычный способ
+            logger.debug(f"📌 Получен фрагмент (UTF-16): '{fragment}'")
+        except Exception as e:
+            logger.warning(f"⚠️ UTF-16 срез не сработал: {e}")
             end = start + entity.length
             if end > len(result):
+                logger.warning(f"⚠️ Выход за границы: start={start}, end={end}, len={len(result)}")
                 continue
             fragment = result[start:end]
+            logger.debug(f"📌 Получен фрагмент (обычный): '{fragment}'")
         
         # Форматируем
         if entity.type == "bold":
@@ -154,14 +172,24 @@ def format_text(text: str, entities: list) -> str:
         elif entity.type == "blockquote":
             replacement = f"> {fragment}"
         else:
+            logger.debug(f"⏭️ Неподдерживаемый тип: {entity.type}")
             continue
         
-        # Заменяем в тексте
-        result = result[:start] + replacement + result[start + entity.length:]
+        logger.debug(f"🔧 Замена: '{fragment}' -> '{replacement}'")
         
-        # Обновляем смещение
-        offset_correction += len(replacement) - len(fragment)
+        # Заменяем в тексте
+        before = result[:start]
+        after = result[start + entity.length:]
+        result = before + replacement + after
+        
+        len_diff = len(replacement) - len(fragment)
+        offset_correction += len_diff
+        logger.debug(f"📊 Изменение длины: {len_diff}")
+        logger.debug(f"📊 Новый offset_correction: {offset_correction}")
+        logger.debug(f"📊 Текст после замены: {repr(result)}")
     
+    logger.debug(f"\n✅ Итоговый текст: {repr(result)}")
+    logger.debug(f"{'='*60}\n")
     return result
 
 class MediaUploader:
@@ -369,6 +397,7 @@ async def send_to_max(text: str, attachments: List[dict] = None):
         "Content-Type": "application/json"
     }
     
+    # ВАЖНО: format должен быть в корне объекта
     data = {
         "text": text or " ",
         "format": "markdown"
@@ -379,17 +408,21 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     
     logger.info("="*80)
     logger.info(f"📤 ОТПРАВКА В MAX")
-    logger.info(f"📝 Текст: {text[:50] if text else 'нет'}")
+    logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
     logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
+    logger.debug(f"📦 Полные данные запроса: {json.dumps(data, indent=2, ensure_ascii=False)}")
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, headers=headers, json=data) as resp:
+                response_text = await resp.text()
+                logger.info(f"📥 Статус ответа: {resp.status}")
+                logger.debug(f"📥 Тело ответа: {response_text}")
+                
                 if resp.status == 200:
                     logger.info("✅ УСПЕШНО")
                     return True
                 else:
-                    response_text = await resp.text()
                     logger.error(f"❌ Ошибка {resp.status}: {response_text}")
                     return False
         except Exception as e:
@@ -399,6 +432,11 @@ async def send_to_max(text: str, attachments: List[dict] = None):
 async def process_media_message(message: types.Message) -> Tuple[str, List[dict]]:
     attachments = []
     text = message.caption or ""
+    
+    logger.debug(f"\n{'='*60}")
+    logger.debug(f"📦 ОБРАБОТКА МЕДИА СООБЩЕНИЯ")
+    logger.debug(f"📝 Исходная подпись: {repr(text)}")
+    logger.debug(f"📊 Есть caption_entities: {len(message.caption_entities) if message.caption_entities else 0}")
     
     try:
         # ФОТО
@@ -411,6 +449,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                 "payload": {"url": photo_url}
             })
             uploader.stats["photo_ok"] += 1
+            logger.debug(f"✅ Фото обработано, URL: {photo_url[:50]}...")
         
         # ВИДЕО
         elif message.video:
@@ -494,6 +533,8 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
     
+    logger.debug(f"📦 Всего вложений: {len(attachments)}")
+    logger.debug(f"{'='*60}\n")
     return text, attachments
 
 @dp.message()
@@ -505,6 +546,8 @@ async def forward(message: types.Message):
     logger.info(f"📨 ID: {message.message_id}")
     logger.info(f"📦 Тип: {message.content_type}")
     logger.info(f"📝 Есть ли текст: {'да' if message.text or message.caption else 'нет'}")
+    logger.info(f"📊 Entities в тексте: {len(message.entities or [])}")
+    logger.info(f"📊 Entities в подписи: {len(message.caption_entities or [])}")
     
     # Извлекаем кнопки
     buttons = extract_buttons(message)
@@ -514,6 +557,9 @@ async def forward(message: types.Message):
         logger.info("📝 Чисто текстовое сообщение")
         text = message.text
         entities = message.entities or []
+        
+        logger.info(f"📝 Исходный текст: {text[:100]}...")
+        logger.info(f"📊 Количество entities: {len(entities)}")
         
         # Форматируем текст
         formatted_text = format_text(text, entities)
@@ -530,6 +576,7 @@ async def forward(message: types.Message):
         # Добавляем подпись о пересылке
         if message.forward_date and message.forward_from_chat:
             formatted_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{formatted_text}"
+            logger.info(f"🔄 Добавлена подпись о пересылке")
         
         await send_to_max(formatted_text, attachments if attachments else None)
         return
@@ -549,17 +596,24 @@ async def forward(message: types.Message):
                 "type": "inline_keyboard",
                 "payload": {"buttons": buttons}
             })
+            logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Форматируем подпись
-        if message.caption:
-            text_entities = message.caption_entities
-            if text and text_entities:
-                text = format_text(text, text_entities)
+        # ВАЖНО: Форматируем подпись ТОЛЬКО если есть entities
+        if message.caption and message.caption_entities:
+            logger.info(f"📝 Форматируем подпись (было): {repr(text)}")
+            logger.info(f"📊 Entities в подписи: {len(message.caption_entities)}")
+            text = format_text(text, message.caption_entities)
+            logger.info(f"📝 После форматирования: {repr(text)}")
+        elif message.caption:
+            logger.info(f"📝 Подпись без форматирования: {repr(text)}")
+        else:
+            logger.info("📝 Подпись отсутствует")
         
         # Добавляем подпись о пересылке
         if message.forward_date and message.forward_from_chat:
             source = message.forward_from_chat.title
             text = f"📢 Переслано из {source}:\n\n{text}"
+            logger.info(f"🔄 Добавлена подпись о пересылке из {source}")
         
         await send_to_max(text, attachments)
         return
@@ -570,7 +624,7 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ 2.0**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0 (ДИАГНОСТИКА)**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
         "• 📝 Текст (UTF-16 форматирование)\n"
         "• 🔘 Кнопки-ссылки\n"
@@ -580,7 +634,8 @@ async def start(message: types.Message):
         "• 🎤 Голосовые\n"
         "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: 2.0 (исправлено форматирование)"
+        "🔍 Уровень логов: DEBUG\n"
+        "✨ Версия: 2.0 (диагностическая)"
     )
 
 @dp.message(Command("stats"))
@@ -602,9 +657,10 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 ✨✨✨")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 (ДИАГНОСТИЧЕСКАЯ) ✨✨✨")
     logger.info("✅ Исправлено: форматирование текста, работа с UTF-16")
     logger.info("✅ Текстовые сообщения пересылаются")
+    logger.info("🔍 Уровень логирования: DEBUG (максимальный)")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
