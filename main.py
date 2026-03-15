@@ -103,20 +103,44 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ТЕКСТОВЫЕ ФУНКЦИИ ===
+# === UTF-16 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+def utf16_len(text: str) -> int:
+    """Возвращает длину строки в UTF-16 символах"""
+    return len(text.encode('utf-16-le')) // 2
+
+def utf16_slice(text: str, start: int, length: int) -> str:
+    """Вырезает фрагмент текста по UTF-16 координатам"""
+    text_utf16 = text.encode('utf-16-le')
+    start_byte = start * 2
+    end_byte = (start + length) * 2
+    return text_utf16[start_byte:end_byte].decode('utf-16-le')
+
+# === ТЕКСТОВЫЕ ФУНКЦИИ С UTF-16 ПОДДЕРЖКОЙ ===
 def format_text(text: str, entities: list) -> str:
-    """Форматирует текст с entities"""
+    """Форматирует текст с учетом UTF-16 смещений"""
     if not entities:
         return text
     
+    # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
     result = text
+    offset_correction = 0
     
     for entity in sorted_entities:
-        start = entity.offset
-        end = start + entity.length
-        fragment = result[start:end]
+        # Корректируем позицию с учетом UTF-16
+        start = entity.offset + offset_correction
         
+        # Получаем фрагмент с учетом UTF-16
+        try:
+            fragment = utf16_slice(result, start, entity.length)
+        except:
+            # Если UTF-16 не сработал, пробуем обычный способ
+            end = start + entity.length
+            if end > len(result):
+                continue
+            fragment = result[start:end]
+        
+        # Форматируем
         if entity.type == "bold":
             replacement = f"**{fragment}**"
         elif entity.type == "italic":
@@ -132,7 +156,11 @@ def format_text(text: str, entities: list) -> str:
         else:
             continue
         
-        result = result[:start] + replacement + result[end:]
+        # Заменяем в тексте
+        result = result[:start] + replacement + result[start + entity.length:]
+        
+        # Обновляем смещение
+        offset_correction += len(replacement) - len(fragment)
     
     return result
 
@@ -335,10 +363,6 @@ uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
 
 async def send_to_max(text: str, attachments: List[dict] = None):
-    if not attachments:
-        logger.warning("⚠️ Нет вложений")
-        return False
-    
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
     headers = {
         "Authorization": MAX_TOKEN,
@@ -355,7 +379,8 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     
     logger.info("="*80)
     logger.info(f"📤 ОТПРАВКА В MAX")
-    logger.info(f"📎 Вложений: {len(attachments)}")
+    logger.info(f"📝 Текст: {text[:50] if text else 'нет'}")
+    logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -479,47 +504,22 @@ async def forward(message: types.Message):
     logger.info("="*80)
     logger.info(f"📨 ID: {message.message_id}")
     logger.info(f"📦 Тип: {message.content_type}")
+    logger.info(f"📝 Есть ли текст: {'да' if message.text or message.caption else 'нет'}")
     
-    # Извлекаем кнопки ДО обработки текста
+    # Извлекаем кнопки
     buttons = extract_buttons(message)
     
-    # Обрабатываем медиа если есть
-    if message.photo or message.video or message.audio or message.voice or message.document:
-        text, attachments = await process_media_message(message)
-        
-        if not attachments:
-            logger.warning("⚠️ Нет вложений")
-            return
-        
-        # Добавляем кнопки к attachments
-        if buttons:
-            attachments.append({
-                "type": "inline_keyboard",
-                "payload": {"buttons": buttons}
-            })
-        
-        # Форматируем текст подписи
-        if message.caption:
-            text_entities = message.caption_entities
-            if text and text_entities:
-                text = format_text(text, text_entities)
-        
-        if message.forward_date and message.forward_from_chat:
-            source = message.forward_from_chat.title
-            text = f"📢 Переслано из {source}:\n\n{text}"
-        
-        await send_to_max(text, attachments)
-        return
-    
-    # ТЕКСТ
-    if message.text:
-        logger.info("📝 Обработка текста")
-        text = message.text or ""
+    # ========== ТЕКСТОВЫЕ СООБЩЕНИЯ ==========
+    if message.text and not message.photo and not message.video and not message.audio and not message.voice and not message.document:
+        logger.info("📝 Чисто текстовое сообщение")
+        text = message.text
         entities = message.entities or []
         
+        # Форматируем текст
         formatted_text = format_text(text, entities)
+        logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
-        # Подготавливаем attachments с кнопками
+        # Добавляем кнопки если есть
         attachments = []
         if buttons:
             attachments.append({
@@ -527,27 +527,60 @@ async def forward(message: types.Message):
                 "payload": {"buttons": buttons}
             })
         
+        # Добавляем подпись о пересылке
         if message.forward_date and message.forward_from_chat:
             formatted_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{formatted_text}"
         
         await send_to_max(formatted_text, attachments if attachments else None)
         return
+    
+    # ========== МЕДИА СООБЩЕНИЯ ==========
+    if message.photo or message.video or message.audio or message.voice or message.document:
+        logger.info("📦 Медиа сообщение")
+        text, attachments = await process_media_message(message)
+        
+        if not attachments:
+            logger.warning("⚠️ Нет вложений")
+            return
+        
+        # Добавляем кнопки
+        if buttons:
+            attachments.append({
+                "type": "inline_keyboard",
+                "payload": {"buttons": buttons}
+            })
+        
+        # Форматируем подпись
+        if message.caption:
+            text_entities = message.caption_entities
+            if text and text_entities:
+                text = format_text(text, text_entities)
+        
+        # Добавляем подпись о пересылке
+        if message.forward_date and message.forward_from_chat:
+            source = message.forward_from_chat.title
+            text = f"📢 Переслано из {source}:\n\n{text}"
+        
+        await send_to_max(text, attachments)
+        return
+    
+    # ========== ЕСЛИ НИ ТЕКСТ, НИ МЕДИА ==========
+    logger.warning(f"⚠️ Неподдерживаемый тип сообщения: {message.content_type}")
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ЗОЛОТОЙ БОТ-ПЕРЕСЫЛЬЩИК MAX**\n\n"
+        "✅ **ЗОЛОТОЙ БОТ 2.0**\n\n"
         "📋 **ПОДДЕРЖИВАЕТСЯ:**\n"
-        "• 📝 Текст (форматирование)\n"
+        "• 📝 Текст (UTF-16 форматирование)\n"
         "• 🔘 Кнопки-ссылки\n"
         "• 📄 PDF, DOC, XLS (транслит)\n"
         "• 🎥 Видео\n"
         "• 🎵 Аудио (с именами)\n"
         "• 🎤 Голосовые\n"
-        "• 🖼️ Фото\n"
-        "• 📦 Пакетная отправка\n\n"
+        "• 🖼️ Фото\n\n"
         "📊 Статистика: /stats\n"
-        "✨ Версия: Золотая (всё включено)"
+        "✨ Версия: 2.0 (исправлено форматирование)"
     )
 
 @dp.message(Command("stats"))
@@ -569,8 +602,9 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ БОТА ✨✨✨")
-    logger.info("✅ ВСЁ ВКЛЮЧЕНО: текст, кнопки, аудио, голосовые, документы, фото, видео")
+    logger.info("✨✨✨ ЗАПУСК ЗОЛОТОЙ ВЕРСИИ 2.0 ✨✨✨")
+    logger.info("✅ Исправлено: форматирование текста, работа с UTF-16")
+    logger.info("✅ Текстовые сообщения пересылаются")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
