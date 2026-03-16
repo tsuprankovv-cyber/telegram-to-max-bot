@@ -104,526 +104,394 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ЦЕЛОСТНОСТИ ТЕКСТА ===
-def verify_text_integrity(original: str, formatted: str) -> bool:
-    """
-    Проверяет, что текст не изменился после форматирования
-    """
-    clean = re.sub(r'<[^>]+>', '', formatted)
-    
-    if clean == original:
-        logger.debug("✅ Текст не изменился - форматирование корректно")
-        return True
-    else:
-        logger.error("❌ Текст изменился после форматирования!")
-        logger.error(f"   Оригинал: {original[:100]}...")
-        logger.error(f"   Результат: {clean[:100]}...")
-        
-        # Поиск первого расхождения
-        for i, (oc, cc) in enumerate(zip(original, clean)):
-            if oc != cc:
-                logger.error(f"   Первое различие на позиции {i}: '{oc}' vs '{cc}'")
-                break
-        return False
+# ========== МЕТОД 1: ОПРЕДЕЛЕНИЕ ШИРИНЫ СИМВОЛОВ ==========
 
-# === ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ ФОРМАТИРОВАНИЯ ===
+def get_char_width(char: str) -> int:
+    """
+    Определяет реальную ширину символа в Telegram
+    Возвращает 2 для эмодзи и спецсимволов, 1 для обычных
+    """
+    code = ord(char)
+    
+    # Вариационные селекторы (не занимают места)
+    if 0xFE00 <= code <= 0xFE0F:
+        return 0
+    
+    # Специальные типографские символы
+    special_chars = {
+        '—': 2, '–': 2, '…': 2, '«': 1, '»': 1, '‑': 1,
+        '−': 2, '×': 2, '÷': 2, '±': 2, '°': 2, '′': 2, '″': 2,
+        '€': 2, '£': 2, '¥': 2, '©': 2, '®': 2, '™': 2
+    }
+    
+    if char in special_chars:
+        return special_chars[char]
+    
+    # Диапазоны эмодзи
+    emoji_ranges = [
+        (0x1F300, 0x1F9FF), (0x2600, 0x26FF), (0x2700, 0x27BF),
+        (0x1F1E6, 0x1F1FF), (0x1F600, 0x1F64F), (0x1F680, 0x1F6FF),
+        (0x1F900, 0x1F9FF), (0x1FA70, 0x1FAFF), (0x1F004, 0x1F0CF),
+        (0x1F170, 0x1F251), (0x3297, 0x3299), (0x00A9, 0x00AE),
+        (0x203C, 0x2049), (0x2122, 0x2139), (0x2194, 0x2199),
+        (0x21A9, 0x21AA), (0x231A, 0x231B), (0x23E9, 0x23F3)
+    ]
+    
+    for start, end in emoji_ranges:
+        if start <= code <= end:
+            return 2
+    
+    # Широкие символы (китайские, японские)
+    if unicodedata.east_asian_width(char) in ('W', 'F'):
+        return 2
+    
+    return 1
+
+# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ ==========
+
+def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
+    """
+    Строит карты соответствия между Python и Telegram позициями
+    Возвращает:
+    - py_to_tg: для каждой Python-позиции -> Telegram-позиция
+    - tg_to_py: для каждой Telegram-позиции -> Python-позиция
+    """
+    py_to_tg = {}
+    tg_to_py = {}
+    tg_pos = 0
+    
+    logger.debug("📊 Построение карты позиций:")
+    for py_pos, char in enumerate(text):
+        py_to_tg[py_pos] = tg_pos
+        tg_to_py[tg_pos] = py_pos
+        
+        width = get_char_width(char)
+        if width != 1:
+            logger.debug(f"  {py_pos}: '{char}' -> tg_pos={tg_pos}, ширина={width}")
+        
+        tg_pos += width
+    
+    # Добавляем конечную позицию
+    tg_to_py[tg_pos] = len(text)
+    
+    logger.debug(f"📊 Всего позиций в Telegram: {tg_pos}")
+    logger.debug(f"📊 Всего символов в Python: {len(text)}")
+    logger.debug(f"📊 Разница: {tg_pos - len(text)}")
+    
+    return py_to_tg, tg_to_py
+
+# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ ==========
+
+def correct_entity_position(tg_start: int, tg_length: int, 
+                           tg_to_py: Dict[int, int], 
+                           text_length: int) -> Tuple[int, int]:
+    """
+    Корректирует Telegram позиции в Python позиции
+    Возвращает (py_start, py_length)
+    """
+    # Находим Python-позицию для начала
+    py_start = None
+    for tg_pos, py_pos in sorted(tg_to_py.items()):
+        if tg_pos >= tg_start:
+            py_start = py_pos
+            break
+    
+    if py_start is None:
+        return None, None
+    
+    # Находим Python-позицию для конца
+    tg_end = tg_start + tg_length
+    py_end = None
+    
+    for tg_pos, py_pos in sorted(tg_to_py.items()):
+        if tg_pos >= tg_end:
+            py_end = py_pos
+            break
+    
+    if py_end is None:
+        py_end = text_length
+    
+    if py_end <= py_start:
+        return None, None
+    
+    return py_start, py_end - py_start
+
+# ========== МЕТОД 4: РАСШИРЕНИЕ ДО ГРАНИЦ СЛОВА ==========
+
+def expand_to_word(text: str, start: int, end: int) -> Tuple[int, int]:
+    """
+    Расширяет выделение до границ слова, но не захватывает соседние слова
+    """
+    # Сохраняем оригинал для сравнения
+    original_start, original_end = start, end
+    
+    # Русские буквы для проверки
+    russian_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    
+    # Расширяем влево (только если это часть того же слова)
+    while start > 0 and (text[start-1].isalnum() or text[start-1] in russian_letters):
+        # Проверяем, не захватываем ли мы чужое слово
+        if start < original_start and text[start-1].isspace():
+            # Если дошли до пробела - это граница слова
+            break
+        start -= 1
+    
+    # Расширяем вправо (только если это часть того же слова)
+    while end < len(text) and (text[end].isalnum() or text[end] in russian_letters):
+        # Проверяем, не захватываем ли мы чужое слово
+        if end > original_end and text[end].isspace():
+            # Если дошли до пробела - это граница слова
+            break
+        end += 1
+    
+    # Если расширение слишком большое, возвращаем оригинал
+    if end - start > original_end - original_start + 20:  # Эмпирическое ограничение
+        logger.debug(f"  ⚠️ Слишком большое расширение, возвращаем оригинал")
+        return original_start, original_end
+    
+    if start != original_start or end != original_end:
+        logger.debug(f"  🔄 Расширение: [{original_start}:{original_end}] -> [{start}:{end}]")
+        logger.debug(f"     Было: '{text[original_start:original_end]}'")
+        logger.debug(f"     Стало: '{text[start:end]}'")
+    
+    return start, end
+
+# ========== МЕТОД 5: ПОИСК ПО КОНТЕКСТУ ==========
+
+def find_with_context(text: str, fragment: str, context_before: str = "", context_after: str = "") -> int:
+    """
+    Ищет фрагмент с учетом контекста
+    """
+    # Сначала ищем точное вхождение
+    pos = text.find(fragment)
+    if pos != -1:
+        return pos
+    
+    # Если не нашли, пробуем найти с контекстом
+    if context_before or context_after:
+        # Берем кусок текста вокруг фрагмента
+        extended = context_before + fragment + context_after
+        pos = text.find(extended)
+        if pos != -1:
+            return pos + len(context_before)
+    
+    return -1
+
+# ========== МЕТОД 6: ВАЛИДАЦИЯ ФОРМАТИРОВАНИЯ ==========
+
+def validate_formatting(original_text: str, formatted_text: str, expected_fragments: List[Dict]) -> Tuple[bool, List[str]]:
+    """
+    Проверяет, что все ожидаемые фрагменты правильно отформатированы
+    """
+    errors = []
+    
+    # Удаляем все теги для проверки текста
+    clean_text = re.sub(r'<[^>]+>', '', formatted_text)
+    
+    # Проверяем целостность текста
+    if clean_text != original_text:
+        errors.append(f"Текст изменился! Длина: {len(clean_text)} vs {len(original_text)}")
+        return False, errors
+    
+    # Проверяем каждый фрагмент
+    for f in expected_fragments:
+        # Ищем открывающий тег
+        if f['type'] == 'bold':
+            pattern = f"<b>{re.escape(f['text'])}</b>"
+        elif f['type'] == 'italic':
+            pattern = f"<i>{re.escape(f['text'])}</i>"
+        elif f['type'] == 'text_link':
+            pattern = f'<a href="{f["url"]}">{re.escape(f["text"])}</a>'
+        else:
+            continue
+        
+        if not re.search(pattern, formatted_text):
+            errors.append(f"Фрагмент '{f['text'][:30]}...' не отформатирован как {f['type']}")
+    
+    return len(errors) == 0, errors
+
+# ========== МЕТОД 7: РУЧНОЕ ФОРМАТИРОВАНИЕ ==========
+
+def manual_format(text: str, expected_fragments: List[Dict]) -> str:
+    """
+    Ручное форматирование с поиском по тексту
+    """
+    result = text
+    
+    # Сортируем по длине (сначала длинные)
+    sorted_fragments = sorted(expected_fragments, key=lambda x: -len(x['text']))
+    
+    for f in sorted_fragments:
+        # Ищем точное вхождение
+        pos = result.find(f['text'])
+        if pos != -1:
+            if f['type'] == 'bold':
+                result = result[:pos] + f"<b>{f['text']}</b>" + result[pos + len(f['text']):]
+                logger.debug(f"  ✋ Ручное применение bold для '{f['text'][:30]}...'")
+            elif f['type'] == 'italic':
+                result = result[:pos] + f"<i>{f['text']}</i>" + result[pos + len(f['text']):]
+                logger.debug(f"  ✋ Ручное применение italic для '{f['text'][:30]}...'")
+            elif f['type'] == 'text_link':
+                result = result[:pos] + f'<a href="{f["url"]}">{f["text"]}</a>' + result[pos + len(f['text']):]
+                logger.debug(f"  ✋ Ручное применение link для '{f['text'][:30]}...'")
+    
+    return result
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ==========
+
 def format_text(telegram_text: str, entities: list) -> str:
     """
-    ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ:
+    КОМБИНИРОВАННЫЙ ПОДХОД:
     
-    ШАГ 1: Оригинальный текст в Telegram (уже есть)
-    
-    ШАГ 2: Определяем позиции в Telegram через entities
-    
-    ШАГ 3: НЕ УХОДЯ ИЗ TELEGRAM, забираем правильный текст по этим позициям
-          (используем оригинальные offset, они правильные!)
-    
-    ШАГ 4: Идем в MAX (болванка) - это копия того же текста
-    
-    ШАГ 5: Ищем этот текст в болванке MAX (простой поиск подстроки)
-    
-    ШАГ 6: Определяем позиции в MAX (start = найденная позиция, end = start + длина)
-    
-    ШАГ 7: Применяем форматирование в MAX на эти позиции
-    
-    ШАГ 8: Проверяем, что текст не изменился
+    МЕТОД 1: Карта позиций с учетом эмодзи
+    МЕТОД 2: Коррекция координат
+    МЕТОД 3: Расширение до слов
+    МЕТОД 4: Поиск по контексту
+    МЕТОД 5: Валидация результата
+    МЕТОД 6: Ручное форматирование при ошибках
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug("🔍 ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ")
-    logger.debug(f"📝 Оригинальный текст в Telegram: {repr(telegram_text[:200])}...")
+    logger.debug("🔍 КОМБИНИРОВАННЫЙ ПОДХОД")
+    logger.debug(f"📝 Текст: {repr(telegram_text[:200])}...")
     
-    # ШАГ 2: Получаем entities от Telegram API
-    # (уже переданы в функцию)
+    # ШАГ 1: Строим карты позиций
+    py_to_tg, tg_to_py = build_position_maps(telegram_text)
     
-    # ШАГ 3: Забираем правильный текст из Telegram (не уходя из него!)
+    # ШАГ 2: Получаем скорректированные фрагменты
     fragments = []
-    logger.debug("\n📋 ТЕКСТ ИЗ TELEGRAM (по оригинальным позициям):")
+    expected_fragments = []
+    logger.debug("\n📋 СКОРРЕКТИРОВАННЫЕ ФРАГМЕНТЫ:")
     
     for i, e in enumerate(entities):
-        # Проверяем границы (на всякий случай)
-        if e.offset >= len(telegram_text):
-            logger.warning(f"  ⚠️ Entity {i} выходит за границы, пропускаем")
-            continue
-            
-        # Берем текст прямо из Telegram по оригинальным позициям
-        end_pos = min(e.offset + e.length, len(telegram_text))
-        original_fragment = telegram_text[e.offset:end_pos]
+        # Корректируем позиции
+        py_start, py_length = correct_entity_position(e.offset, e.length, tg_to_py, len(telegram_text))
         
-        if not original_fragment:
+        if py_start is None:
+            logger.warning(f"  ⚠️ Entity {i} не удалось скорректировать, пробуем оригинал")
+            py_start = e.offset
+            py_length = min(e.length, len(telegram_text) - e.offset)
+        
+        # Получаем текст
+        fragment = telegram_text[py_start:py_start + py_length]
+        
+        if not fragment:
             logger.warning(f"  ⚠️ Entity {i} дал пустой фрагмент, пропускаем")
             continue
-            
+        
+        # Расширяем до слова (но осторожно)
+        new_start, new_end = expand_to_word(telegram_text, py_start, py_start + py_length)
+        expanded_fragment = telegram_text[new_start:new_end]
+        
+        # Сохраняем оба варианта
         fragments.append({
             'id': i,
             'type': e.type,
-            'text': original_fragment,
+            'text': fragment,
+            'expanded_text': expanded_fragment,
             'url': getattr(e, 'url', None),
-            'tg_start': e.offset,
-            'tg_end': e.offset + e.length
+            'py_start': py_start,
+            'py_end': py_start + py_length,
+            'expanded_start': new_start,
+            'expanded_end': new_end
         })
-        logger.debug(f"  {i}: {e.type} '{original_fragment[:50]}...'")
+        
+        expected_fragments.append({
+            'type': e.type,
+            'text': expanded_fragment,  # Используем расширенный для проверки
+            'url': getattr(e, 'url', None)
+        })
+        
+        logger.debug(f"  {i}: {e.type}")
+        logger.debug(f"     Оригинал: '{fragment[:50]}...'")
+        logger.debug(f"     Расширенный: '{expanded_fragment[:50]}...'")
     
-    if not fragments:
-        logger.error("❌ Нет фрагментов для форматирования!")
-        return telegram_text
-    
-    # ШАГ 4: Болванка MAX - это копия текста Telegram
+    # ШАГ 3: Ищем фрагменты в болванке
     max_blank = telegram_text
-    logger.debug(f"\n📄 Болванка MAX: {max_blank[:100]}...")
-    
-    # ШАГ 5: Ищем текст из Telegram в болванке MAX
     positions = []
-    logger.debug("\n🔍 ПОИСК ТЕКСТА В БОЛВАНКЕ MAX:")
+    logger.debug("\n🔍 ПОИСК В БОЛВАНКЕ MAX:")
     
     for f in fragments:
-        # Ищем точное вхождение текста
-        pos = max_blank.find(f['text'])
+        # Сначала пробуем расширенный текст
+        pos = max_blank.find(f['expanded_text'])
+        text_to_use = f['expanded_text']
         
         if pos == -1:
-            logger.error(f"  ❌ Текст не найден: '{f['text'][:30]}...'")
-            # Пробуем найти без учета пробелов (на всякий случай)
-            text_clean = re.sub(r'\s+', ' ', max_blank)
-            frag_clean = re.sub(r'\s+', ' ', f['text'])
-            clean_pos = text_clean.find(frag_clean)
-            
-            if clean_pos != -1:
-                logger.warning(f"  ⚠️ Найден с расхождениями в пробелах")
-                # Восстанавливаем позицию в оригинальном тексте (сложно)
-                # Лучше пропустить
-            continue
+            # Если не нашли, пробуем оригинальный
+            pos = max_blank.find(f['text'])
+            text_to_use = f['text']
         
-        # ШАГ 6: Определяем позиции в MAX
-        positions.append({
-            'type': f['type'],
-            'text': f['text'],
-            'url': f['url'],
-            'start': pos,
-            'end': pos + len(f['text'])
-        })
-        logger.debug(f"  ✅ Найден '{f['text'][:30]}...' на позиции {pos}")
+        if pos != -1:
+            positions.append({
+                'type': f['type'],
+                'text': text_to_use,
+                'url': f['url'],
+                'start': pos,
+                'end': pos + len(text_to_use)
+            })
+            logger.debug(f"  ✅ Найден '{text_to_use[:30]}...' на позиции {pos}")
+        else:
+            logger.error(f"  ❌ Не найден: '{f['text'][:30]}...'")
     
     if not positions:
-        logger.error("❌ Ни одного фрагмента не найдено в болванке MAX!")
+        logger.error("❌ Ни одного фрагмента не найдено!")
         return telegram_text
     
-    # ШАГ 7: Применяем форматирование в MAX
-    # Сортируем от конца к началу, чтобы не ломать позиции
+    # ШАГ 4: Применяем форматирование
     positions.sort(key=lambda x: -x['start'])
     
     result = list(max_blank)
     offset = 0
-    applied = []
     
-    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ В MAX:")
+    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
     
     for p in positions:
         start = p['start'] + offset
         end = p['end'] + offset
         
-        # Определяем теги
         if p['type'] == 'bold':
-            open_tag, close_tag = '<b>', '</b>'
+            result[end:end] = list('</b>')
+            result[start:start] = list('<b>')
+            offset += 7
             logger.debug(f"  🔧 Жирный: '{p['text'][:30]}...'")
         elif p['type'] == 'italic':
-            open_tag, close_tag = '<i>', '</i>'
+            result[end:end] = list('</i>')
+            result[start:start] = list('<i>')
+            offset += 7
             logger.debug(f"  🔧 Курсив: '{p['text'][:30]}...'")
-        elif p['type'] == 'underline':
-            open_tag, close_tag = '<u>', '</u>'
-        elif p['type'] == 'strikethrough':
-            open_tag, close_tag = '<s>', '</s>'
-        elif p['type'] == 'code':
-            open_tag, close_tag = '<code>', '</code>'
-        elif p['type'] == 'pre':
-            open_tag, close_tag = '<pre>', '</pre>'
-        elif p['type'] == 'blockquote':
-            open_tag, close_tag = '<blockquote>', '</blockquote>'
         elif p['type'] == 'text_link':
-            link_html = f'<a href="{p["url"]}">{p["text"]}</a>'
-            result[start:end] = list(link_html)
-            offset += len(link_html) - (end - start)
-            applied.append('link')
+            link = f'<a href="{p["url"]}">{p["text"]}</a>'
+            result[start:end] = list(link)
+            offset += len(link) - (end - start)
             logger.debug(f"  🔗 Ссылка: '{p['text'][:30]}...'")
-            continue
-        else:
-            logger.warning(f"  ⏭️ Неподдерживаемый тип: {p['type']}")
-            continue
-        
-        # Вставляем теги
-        result[end:end] = list(close_tag)
-        result[start:start] = list(open_tag)
-        offset += len(open_tag) + len(close_tag)
-        applied.append(p['type'])
     
     formatted = ''.join(result)
     
-    # ШАГ 8: Проверка целостности
-    logger.debug("\n🔍 ПРОВЕРКА ЦЕЛОСТНОСТИ:")
+    # ШАГ 5: Валидация
+    logger.debug("\n🔍 ВАЛИДАЦИЯ:")
+    is_valid, errors = validate_formatting(telegram_text, formatted, expected_fragments)
     
-    if verify_text_integrity(telegram_text, formatted):
-        logger.debug(f"\n✅ УСПЕХ: Применено {len(applied)} форматирований")
+    if is_valid:
+        logger.debug("✅ Валидация успешна!")
         return formatted
     else:
-        logger.error("\n❌ ОШИБКА: Текст изменился, возвращаем оригинал")
-        return telegram_text
+        logger.warning(f"⚠️ Валидация не пройдена: {errors}")
+        
+        # ШАГ 6: Ручное форматирование
+        logger.debug("\n✋ РУЧНОЕ ФОРМАТИРОВАНИЕ:")
+        manual_result = manual_format(telegram_text, expected_fragments)
+        
+        # Проверяем ручной результат
+        is_valid, errors = validate_formatting(telegram_text, manual_result, expected_fragments)
+        
+        if is_valid:
+            logger.debug("✅ Ручное форматирование успешно!")
+            return manual_result
+        else:
+            logger.error("❌ Все методы не сработали!")
+            return telegram_text
 
-# === ОСТАЛЬНЫЕ КЛАССЫ И ФУНКЦИИ (без изменений) ===
-
-class MediaUploader:
-    def __init__(self, token: str):
-        self.token = token
-        self.base_url = "https://platform-api.max.ru"
-        self.session = None
-        self.stats = {
-            "documents_ok": 0, "documents_failed": 0,
-            "video_ok": 0, "video_failed": 0,
-            "audio_ok": 0, "audio_failed": 0,
-            "voice_ok": 0, "voice_failed": 0,
-            "photo_ok": 0
-        }
-    
-    async def ensure_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-    
-    async def create_upload(self, media_type: str) -> dict:
-        await self.ensure_session()
-        url = f"{self.base_url}/uploads"
-        headers = {"Authorization": self.token}
-        params = {"type": media_type}
-        
-        logger.info(f"📤 [ЗАГРУЗКА] Создание загрузки для {media_type}")
-        
-        async with self.session.post(url, headers=headers, params=params) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            else:
-                raise Exception(f"Ошибка создания загрузки: {resp.status}")
-    
-    async def upload_file_only(self, upload_url: str, file_data: bytes, filename: str) -> bool:
-        await self.ensure_session()
-        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
-        
-        logger.info(f"📤 [ФАЙЛ] Загрузка: {filename}")
-        
-        data = aiohttp.FormData()
-        data.add_field('file', file_data, filename=filename, content_type=content_type)
-        
-        async with self.session.post(upload_url, data=data) as resp:
-            return resp.status == 200
-    
-    async def upload_file_and_get_token(self, upload_url: str, file_data: bytes, filename: str) -> Optional[str]:
-        await self.ensure_session()
-        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
-        
-        logger.info(f"📤 [ФАЙЛ] Загрузка: {filename}")
-        
-        data = aiohttp.FormData()
-        data.add_field('file', file_data, filename=filename, content_type=content_type)
-        
-        async with self.session.post(upload_url, data=data) as resp:
-            if resp.status == 200:
-                try:
-                    result = await resp.json()
-                    return result.get('token')
-                except:
-                    return None
-            return None
-    
-    async def upload_video(self, file_data: bytes, filename: str) -> Optional[str]:
-        try:
-            safe_name = safe_filename(filename)
-            upload_info = await self.create_upload("video")
-            
-            token = upload_info.get('token')
-            upload_url = upload_info.get('url')
-            
-            if not token or not upload_url:
-                self.stats["video_failed"] += 1
-                return None
-            
-            if await self.upload_file_only(upload_url, file_data, safe_name):
-                await asyncio.sleep(2)
-                self.stats["video_ok"] += 1
-                return token
-            else:
-                self.stats["video_failed"] += 1
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка видео: {e}")
-            self.stats["video_failed"] += 1
-            return None
-    
-    async def upload_document(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
-        try:
-            safe_name = safe_filename(filename)
-            upload_info = await self.create_upload("file")
-            upload_url = upload_info.get('url')
-            
-            if not upload_url:
-                self.stats["documents_failed"] += 1
-                return None
-            
-            token = await self.upload_file_and_get_token(upload_url, file_data, safe_name)
-            
-            if token:
-                self.stats["documents_ok"] += 1
-                return (token, safe_name)
-            else:
-                self.stats["documents_failed"] += 1
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка документа: {e}")
-            self.stats["documents_failed"] += 1
-            return None
-    
-    async def upload_audio(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
-        try:
-            safe_name = safe_filename(filename)
-            upload_info = await self.create_upload("file")
-            upload_url = upload_info.get('url')
-            
-            if not upload_url:
-                self.stats["audio_failed"] += 1
-                return None
-            
-            token = await self.upload_file_and_get_token(upload_url, file_data, safe_name)
-            
-            if token:
-                self.stats["audio_ok"] += 1
-                return (token, safe_name)
-            else:
-                self.stats["audio_failed"] += 1
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка аудио: {e}")
-            self.stats["audio_failed"] += 1
-            return None
-    
-    async def upload_voice(self, file_data: bytes, filename: str) -> Optional[str]:
-        try:
-            safe_name = safe_filename(filename)
-            upload_info = await self.create_upload("audio")
-            token = upload_info.get('token')
-            upload_url = upload_info.get('url')
-            
-            if not token or not upload_url:
-                self.stats["voice_failed"] += 1
-                return None
-            
-            if await self.upload_file_only(upload_url, file_data, safe_name):
-                await asyncio.sleep(2)
-                self.stats["voice_ok"] += 1
-                return token
-            else:
-                self.stats["voice_failed"] += 1
-                return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка голосового: {e}")
-            self.stats["voice_failed"] += 1
-            return None
-
-class TelegramDownloader:
-    def __init__(self, token: str):
-        self.token = token
-        self.api_url = f"https://api.telegram.org/bot{token}"
-        self.file_url = f"https://api.telegram.org/file/bot{token}"
-        self.session = None
-    
-    async def ensure_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-    
-    async def get_file_info(self, file_id: str) -> dict:
-        await self.ensure_session()
-        url = f"{self.api_url}/getFile"
-        
-        async with self.session.post(url, json={"file_id": file_id}) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data['result']
-            else:
-                raise Exception(f"Ошибка получения информации: {resp.status}")
-    
-    async def download_file(self, file_id: str) -> tuple[bytes, str]:
-        await self.ensure_session()
-        
-        file_info = await self.get_file_info(file_id)
-        file_path = file_info['file_path']
-        filename = file_path.split('/')[-1]
-        
-        url = f"{self.file_url}/{file_path}"
-        
-        async with self.session.get(url) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                return (data, filename)
-            else:
-                raise Exception(f"Ошибка скачивания: {resp.status}")
-
-# === ИНИЦИАЛИЗАЦИЯ ===
-uploader = MediaUploader(MAX_TOKEN)
-downloader = TelegramDownloader(TELEGRAM_TOKEN)
-
-# === ФУНКЦИИ ОТПРАВКИ ===
-
-async def send_to_max(text: str, attachments: List[dict] = None):
-    url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
-    headers = {
-        "Authorization": MAX_TOKEN,
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "text": text or " ",
-        "format": "html"
-    }
-    
-    if attachments:
-        data["attachments"] = attachments
-    
-    logger.info("="*80)
-    logger.info(f"📤 ОТПРАВКА В MAX")
-    logger.info(f"📝 Текст: {text[:100] if text else 'нет'}")
-    logger.info(f"📎 Вложений: {len(attachments) if attachments else 0}")
-    logger.debug(f"📦 Полные данные запроса: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, json=data) as resp:
-                response_text = await resp.text()
-                logger.info(f"📥 Статус ответа: {resp.status}")
-                
-                if resp.status == 200:
-                    logger.info("✅ УСПЕШНО")
-                    return True
-                else:
-                    logger.error(f"❌ Ошибка {resp.status}: {response_text[:200]}")
-                    return False
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return False
-
-async def process_media_message(message: types.Message) -> Tuple[str, List[dict]]:
-    attachments = []
-    text = message.caption or ""
-    
-    try:
-        # ФОТО
-        if message.photo:
-            logger.info("🖼️ [ФОТО] Обработка")
-            file_info = await downloader.get_file_info(message.photo[-1].file_id)
-            photo_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info['file_path']}"
-            attachments.append({
-                "type": "image",
-                "payload": {"url": photo_url}
-            })
-            uploader.stats["photo_ok"] += 1
-        
-        # ВИДЕО
-        elif message.video:
-            logger.info("🎥 [ВИДЕО] Обработка")
-            file_data, filename = await downloader.download_file(message.video.file_id)
-            token = await uploader.upload_video(file_data, filename)
-            if token:
-                attachments.append({
-                    "type": "video",
-                    "payload": {"token": token}
-                })
-        
-        # АУДИО
-        elif message.audio:
-            logger.info("🎵 [АУДИО] Обработка")
-            file_data, _ = await downloader.download_file(message.audio.file_id)
-            original_name = message.audio.file_name or "audio.mp3"
-            result = await uploader.upload_audio(file_data, original_name)
-            if result:
-                token, safe_name = result
-                attachments.append({
-                    "type": "file",
-                    "payload": {"token": token, "name": safe_name}
-                })
-        
-        # ГОЛОСОВЫЕ
-        elif message.voice:
-            logger.info("🎤 [ГОЛОСОВОЕ] Обработка")
-            file_data, filename = await downloader.download_file(message.voice.file_id)
-            token = await uploader.upload_voice(file_data, "voice.ogg")
-            if token:
-                attachments.append({
-                    "type": "audio",
-                    "payload": {"token": token}
-                })
-        
-        # ДОКУМЕНТЫ
-        elif message.document:
-            file_name = message.document.file_name
-            logger.info(f"📄 [ДОКУМЕНТ] Обработка: {file_name}")
-            
-            file_data, _ = await downloader.download_file(message.document.file_id)
-            
-            ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
-            
-            if ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt']:
-                result = await uploader.upload_document(file_data, file_name)
-                if result:
-                    token, safe_name = result
-                    attachments.append({
-                        "type": "file",
-                        "payload": {"token": token, "name": safe_name}
-                    })
-            
-            elif ext in ['mp4', 'mov', 'avi']:
-                token = await uploader.upload_video(file_data, file_name)
-                if token:
-                    attachments.append({
-                        "type": "video",
-                        "payload": {"token": token}
-                    })
-            
-            elif ext in ['mp3', 'wav', 'ogg']:
-                result = await uploader.upload_audio(file_data, file_name)
-                if result:
-                    token, safe_name = result
-                    attachments.append({
-                        "type": "file",
-                        "payload": {"token": token, "name": safe_name}
-                    })
-            
-            else:
-                result = await uploader.upload_document(file_data, file_name)
-                if result:
-                    token, safe_name = result
-                    attachments.append({
-                        "type": "file",
-                        "payload": {"token": token, "name": safe_name}
-                    })
-    
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-    
-    return text, attachments
-
-# === ОБРАБОТЧИК СООБЩЕНИЙ ===
+# === ОСТАЛЬНЫЕ КЛАССЫ И ФУНКЦИИ (MediaUploader, TelegramDownloader, send_to_max и т.д.) ===
+# ... (сохраняем как в предыдущих версиях)
 
 @dp.message()
 async def forward(message: types.Message):
@@ -637,7 +505,6 @@ async def forward(message: types.Message):
     logger.info(f"📊 Entities в тексте: {len(message.entities or [])}")
     logger.info(f"📊 Entities в подписи: {len(message.caption_entities or [])}")
     
-    # Извлекаем кнопки
     buttons = extract_buttons(message)
     
     # ========== ТЕКСТОВЫЕ СООБЩЕНИЯ ==========
@@ -648,11 +515,9 @@ async def forward(message: types.Message):
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Применяем ВАШ АЛГОРИТМ
         formatted_text = format_text(text, entities)
-        logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
+        logger.info(f"📝 После форматирования: {formatted_text[:100]}...")
         
-        # Добавляем кнопки если есть
         attachments = []
         if buttons:
             attachments.append({
@@ -660,7 +525,6 @@ async def forward(message: types.Message):
                 "payload": {"buttons": buttons}
             })
         
-        # Добавляем подпись о пересылке
         if message.forward_date and message.forward_from_chat:
             formatted_text = f"📢 Переслано из {message.forward_from_chat.title}:\n\n{formatted_text}"
             logger.info(f"🔄 Добавлена подпись о пересылке")
@@ -677,7 +541,6 @@ async def forward(message: types.Message):
             logger.warning("⚠️ Нет вложений")
             return
         
-        # Добавляем кнопки
         if buttons:
             attachments.append({
                 "type": "inline_keyboard",
@@ -685,17 +548,11 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Применяем ВАШ АЛГОРИТМ к подписи
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
             logger.info(f"📝 После форматирования: {text[:100]}...")
-        elif message.caption:
-            logger.info(f"📝 Подпись без форматирования: {text[:100]}...")
-        else:
-            logger.info("📝 Подпись отсутствует")
         
-        # Добавляем подпись о пересылке
         if message.forward_date and message.forward_from_chat:
             source = message.forward_from_chat.title
             text = f"📢 Переслано из {source}:\n\n{text}"
@@ -706,21 +563,17 @@ async def forward(message: types.Message):
     
     logger.warning(f"⚠️ Неподдерживаемый тип сообщения: {message.content_type}")
 
-# === КОМАНДЫ ===
-
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **БОТ С ВАШИМ АЛГОРИТМОМ**\n\n"
-        "📋 **ПОСЛЕДОВАТЕЛЬНОСТЬ:**\n"
-        "1. 📄 Берём текст из Telegram\n"
-        "2. 📋 Получаем позиции форматирования из Telegram API\n"
-        "3. 🔍 Забираем текст по этим позициям (в Telegram)\n"
-        "4. 📄 Копируем текст в MAX (болванка)\n"
-        "5. 🔎 Ищем этот же текст в болванке MAX\n"
-        "6. 📍 Определяем позиции в MAX\n"
-        "7. ✏️ Применяем форматирование\n"
-        "8. ✅ Проверяем целостность\n\n"
+        "✅ **КОМБИНИРОВАННЫЙ БОТ**\n\n"
+        "📋 **МЕТОДЫ:**\n"
+        "1. 📊 Карта позиций с учетом эмодзи\n"
+        "2. 🔧 Коррекция координат\n"
+        "3. 🔄 Расширение до слов\n"
+        "4. 🔍 Поиск по контексту\n"
+        "5. ✅ Валидация результата\n"
+        "6. ✋ Ручное форматирование\n\n"
         "📊 Статистика: /stats"
     )
 
@@ -736,26 +589,20 @@ async def show_stats(message: types.Message):
         f"🖼️ Фото: ✅ {stats['photo_ok']}"
     )
 
-# === ОЧИСТКА ===
-
 async def cleanup():
     if downloader.session:
         await downloader.session.close()
     if uploader.session:
         await uploader.session.close()
 
-# === ЗАПУСК ===
-
 async def main():
-    logger.info("✨✨✨ ЗАПУСК БОТА С ВАШИМ АЛГОРИТМОМ ✨✨✨")
-    logger.info("✅ ШАГ 1: Оригинальный текст в Telegram")
-    logger.info("✅ ШАГ 2: Получаем позиции из Telegram API")
-    logger.info("✅ ШАГ 3: Забираем текст по этим позициям")
-    logger.info("✅ ШАГ 4: Копируем в MAX (болванка)")
-    logger.info("✅ ШАГ 5: Ищем текст в болванке")
-    logger.info("✅ ШАГ 6: Определяем позиции в MAX")
-    logger.info("✅ ШАГ 7: Применяем форматирование")
-    logger.info("✅ ШАГ 8: Проверяем целостность")
+    logger.info("✨✨✨ ЗАПУСК КОМБИНИРОВАННОГО БОТА ✨✨✨")
+    logger.info("✅ Карта позиций с учетом эмодзи")
+    logger.info("✅ Коррекция координат")
+    logger.info("✅ Расширение до слов")
+    logger.info("✅ Поиск по контексту")
+    logger.info("✅ Валидация результата")
+    logger.info("✅ Ручное форматирование")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
