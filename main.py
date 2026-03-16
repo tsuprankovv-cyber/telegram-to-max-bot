@@ -104,98 +104,7 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЗИЦИЯМИ ===
-
-def get_char_width(char: str) -> int:
-    """Определяет ширину символа в Telegram (2 для эмодзи, 1 для обычных)"""
-    code = ord(char)
-    # Эмодзи и спецсимволы
-    if 0x1F300 <= code <= 0x1F9FF or 0x2600 <= code <= 0x26FF or 0x2700 <= code <= 0x27BF:
-        return 2
-    # Специальные типографские символы
-    special = {'—': 2, '–': 2, '…': 2, '«': 1, '»': 1, '‑': 1}
-    if char in special:
-        return special[char]
-    # Широкие символы (китайские, японские и т.д.)
-    if unicodedata.east_asian_width(char) in ('W', 'F'):
-        return 2
-    return 1
-
-def build_position_map(text: str) -> Dict[int, int]:
-    """
-    Строит словарь: для каждой позиции в Python (индекс символа)
-    возвращает соответствующую позицию в Telegram (с учётом эмодзи).
-    """
-    pos_map = {}
-    tg_pos = 0
-    logger.debug("📊 Построение карты позиций:")
-    for py_pos, ch in enumerate(text):
-        pos_map[py_pos] = tg_pos
-        width = get_char_width(ch)
-        if width != 1:
-            logger.debug(f"  {py_pos}: '{ch}' -> tg_pos={tg_pos}, ширина={width}")
-        tg_pos += width
-    pos_map[len(text)] = tg_pos
-    logger.debug(f"📊 Всего позиций в Telegram: {tg_pos}, в Python: {len(text)}")
-    return pos_map
-
-def correct_entity(entity_start: int, entity_length: int, pos_map: Dict[int, int], text_len: int) -> Tuple[int, int]:
-    """
-    Преобразует Telegram-позиции в Python-позиции, используя карту.
-    Возвращает (start_py, length_py).
-    """
-    # Находим Python-позицию для начала
-    start_py = None
-    for py_pos, tg_pos in pos_map.items():
-        if py_pos == text_len:
-            continue
-        if tg_pos >= entity_start:
-            start_py = py_pos
-            break
-    if start_py is None:
-        return None, None
-
-    # Определяем конец в Telegram
-    tg_end = entity_start + entity_length
-    # Находим Python-позицию для конца
-    end_py = None
-    for py_pos, tg_pos in pos_map.items():
-        if tg_pos >= tg_end:
-            end_py = py_pos
-            break
-    if end_py is None:
-        end_py = text_len
-
-    length_py = end_py - start_py
-    if length_py <= 0:
-        return None, None
-    return start_py, length_py
-
-# === ФУНКЦИЯ ДЛЯ РАСШИРЕНИЯ ДО ЦЕЛЫХ СЛОВ ===
-
-def expand_to_word(text: str, start: int, end: int) -> Tuple[int, int]:
-    """
-    Расширяет выделение до границ целого слова
-    """
-    original_start, original_end = start, end
-    
-    # Расширяем влево до начала слова
-    while start > 0 and (text[start-1].isalnum() or text[start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
-        start -= 1
-    
-    # Расширяем вправо до конца слова
-    while end < len(text) and (text[end].isalnum() or text[end] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
-        end += 1
-    
-    if start != original_start or end != original_end:
-        logger.debug(f"  🔄 Расширение слова: [{original_start}:{original_end}] -> [{start}:{end}]")
-        logger.debug(f"     Было: '{text[original_start:original_end]}'")
-        logger.debug(f"     Стало: '{text[start:end]}'")
-    
-    return start, end
-
 # === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ЦЕЛОСТНОСТИ ТЕКСТА ===
-
 def verify_text_integrity(original: str, formatted: str) -> bool:
     """
     Проверяет, что текст не изменился после форматирования
@@ -217,95 +126,115 @@ def verify_text_integrity(original: str, formatted: str) -> bool:
                 break
         return False
 
-# === ОСНОВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
-
+# === ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ ФОРМАТИРОВАНИЯ ===
 def format_text(telegram_text: str, entities: list) -> str:
     """
-    ВАШ АЛГОРИТМ С ОГРАНИЧЕНИЕМ НА ЦЕЛЫЕ СЛОВА:
-    1. Корректируем позиции с учётом эмодзи
-    2. Расширяем выделение до целых слов
-    3. Получаем правильные фрагменты текста
-    4. Находим их в исходном тексте
-    5. Применяем форматирование (от конца к началу)
-    6. Проверяем целостность
+    ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ:
+    
+    ШАГ 1: Оригинальный текст в Telegram (уже есть)
+    
+    ШАГ 2: Определяем позиции в Telegram через entities
+    
+    ШАГ 3: НЕ УХОДЯ ИЗ TELEGRAM, забираем правильный текст по этим позициям
+          (используем оригинальные offset, они правильные!)
+    
+    ШАГ 4: Идем в MAX (болванка) - это копия того же текста
+    
+    ШАГ 5: Ищем этот текст в болванке MAX (простой поиск подстроки)
+    
+    ШАГ 6: Определяем позиции в MAX (start = найденная позиция, end = start + длина)
+    
+    ШАГ 7: Применяем форматирование в MAX на эти позиции
+    
+    ШАГ 8: Проверяем, что текст не изменился
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug("🔍 ФОРМАТИРОВАНИЕ С РАСШИРЕНИЕМ ДО СЛОВ")
-    logger.debug(f"📝 Исходный текст: {repr(telegram_text[:200])}...")
+    logger.debug("🔍 ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ")
+    logger.debug(f"📝 Оригинальный текст в Telegram: {repr(telegram_text[:200])}...")
     
-    # ШАГ 1: Строим карту позиций
-    pos_map = build_position_map(telegram_text)
+    # ШАГ 2: Получаем entities от Telegram API
+    # (уже переданы в функцию)
     
-    # ШАГ 2: Корректируем и расширяем entities
+    # ШАГ 3: Забираем правильный текст из Telegram (не уходя из него!)
     fragments = []
-    logger.debug("\n📋 КОРРЕКЦИЯ И РАСШИРЕНИЕ:")
+    logger.debug("\n📋 ТЕКСТ ИЗ TELEGRAM (по оригинальным позициям):")
     
     for i, e in enumerate(entities):
-        # Корректируем позиции
-        py_start, py_length = correct_entity(e.offset, e.length, pos_map, len(telegram_text))
-        if py_start is None:
-            logger.warning(f"  ⚠️ Entity {i} не удалось скорректировать, пропускаем")
+        # Проверяем границы (на всякий случай)
+        if e.offset >= len(telegram_text):
+            logger.warning(f"  ⚠️ Entity {i} выходит за границы, пропускаем")
             continue
+            
+        # Берем текст прямо из Telegram по оригинальным позициям
+        end_pos = min(e.offset + e.length, len(telegram_text))
+        original_fragment = telegram_text[e.offset:end_pos]
         
-        # Расширяем до целого слова
-        new_start, new_end = expand_to_word(telegram_text, py_start, py_start + py_length)
-        fragment = telegram_text[new_start:new_end]
-        
-        if not fragment:
+        if not original_fragment:
             logger.warning(f"  ⚠️ Entity {i} дал пустой фрагмент, пропускаем")
             continue
-        
+            
         fragments.append({
             'id': i,
             'type': e.type,
-            'text': fragment,
+            'text': original_fragment,
             'url': getattr(e, 'url', None),
-            'start': new_start,
-            'end': new_end
+            'tg_start': e.offset,
+            'tg_end': e.offset + e.length
         })
-        logger.debug(f"  {i}: {e.type} '{fragment[:50]}...'")
+        logger.debug(f"  {i}: {e.type} '{original_fragment[:50]}...'")
     
-    # ШАГ 3: Находим позиции фрагментов в исходном тексте
+    if not fragments:
+        logger.error("❌ Нет фрагментов для форматирования!")
+        return telegram_text
+    
+    # ШАГ 4: Болванка MAX - это копия текста Telegram
+    max_blank = telegram_text
+    logger.debug(f"\n📄 Болванка MAX: {max_blank[:100]}...")
+    
+    # ШАГ 5: Ищем текст из Telegram в болванке MAX
     positions = []
-    logger.debug("\n🔍 ПОИСК ФРАГМЕНТОВ В ТЕКСТЕ:")
+    logger.debug("\n🔍 ПОИСК ТЕКСТА В БОЛВАНКЕ MAX:")
     
     for f in fragments:
         # Ищем точное вхождение текста
-        pos = telegram_text.find(f['text'])
+        pos = max_blank.find(f['text'])
+        
         if pos == -1:
-            logger.error(f"  ❌ Фрагмент '{f['text'][:30]}...' не найден!")
+            logger.error(f"  ❌ Текст не найден: '{f['text'][:30]}...'")
+            # Пробуем найти без учета пробелов (на всякий случай)
+            text_clean = re.sub(r'\s+', ' ', max_blank)
+            frag_clean = re.sub(r'\s+', ' ', f['text'])
+            clean_pos = text_clean.find(frag_clean)
+            
+            if clean_pos != -1:
+                logger.warning(f"  ⚠️ Найден с расхождениями в пробелах")
+                # Восстанавливаем позицию в оригинальном тексте (сложно)
+                # Лучше пропустить
             continue
         
-        # Убеждаемся, что это целое слово (проверяем границы)
-        word_start = pos
-        word_end = pos + len(f['text'])
-        
-        # Проверяем, что это действительно отдельное слово
-        if word_start > 0 and (telegram_text[word_start-1].isalnum() or telegram_text[word_start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
-            logger.warning(f"  ⚠️ Фрагмент не начинается с границы слова, но мы уже расширили")
-        
+        # ШАГ 6: Определяем позиции в MAX
         positions.append({
             'type': f['type'],
             'text': f['text'],
             'url': f['url'],
-            'start': word_start,
-            'end': word_end
+            'start': pos,
+            'end': pos + len(f['text'])
         })
-        logger.debug(f"  ✅ Найден '{f['text'][:30]}...' на позиции {word_start}")
+        logger.debug(f"  ✅ Найден '{f['text'][:30]}...' на позиции {pos}")
     
     if not positions:
-        logger.error("❌ Ни одного фрагмента не найдено!")
+        logger.error("❌ Ни одного фрагмента не найдено в болванке MAX!")
         return telegram_text
     
-    # ШАГ 4: Сортируем от конца к началу
+    # ШАГ 7: Применяем форматирование в MAX
+    # Сортируем от конца к началу, чтобы не ломать позиции
     positions.sort(key=lambda x: -x['start'])
     
-    # Применяем форматирование
-    result = list(telegram_text)
+    result = list(max_blank)
     offset = 0
     applied = []
     
-    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
+    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ В MAX:")
     
     for p in positions:
         start = p['start'] + offset
@@ -347,7 +276,7 @@ def format_text(telegram_text: str, entities: list) -> str:
     
     formatted = ''.join(result)
     
-    # ШАГ 5: Проверка целостности
+    # ШАГ 8: Проверка целостности
     logger.debug("\n🔍 ПРОВЕРКА ЦЕЛОСТНОСТИ:")
     
     if verify_text_integrity(telegram_text, formatted):
@@ -357,7 +286,7 @@ def format_text(telegram_text: str, entities: list) -> str:
         logger.error("\n❌ ОШИБКА: Текст изменился, возвращаем оригинал")
         return telegram_text
 
-# === КЛАССЫ ДЛЯ РАБОТЫ С МЕДИА (без изменений) ===
+# === ОСТАЛЬНЫЕ КЛАССЫ И ФУНКЦИИ (без изменений) ===
 
 class MediaUploader:
     def __init__(self, token: str):
@@ -719,7 +648,7 @@ async def forward(message: types.Message):
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Применяем форматирование с расширением до слов
+        # Применяем ВАШ АЛГОРИТМ
         formatted_text = format_text(text, entities)
         logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
@@ -756,7 +685,7 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Применяем форматирование к подписи
+        # Применяем ВАШ АЛГОРИТМ к подписи
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
@@ -782,14 +711,16 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **БОТ С РАСШИРЕНИЕМ ДО СЛОВ**\n\n"
-        "📋 **АЛГОРИТМ:**\n"
+        "✅ **БОТ С ВАШИМ АЛГОРИТМОМ**\n\n"
+        "📋 **ПОСЛЕДОВАТЕЛЬНОСТЬ:**\n"
         "1. 📄 Берём текст из Telegram\n"
-        "2. 🔧 Корректируем позиции с учётом эмодзи\n"
-        "3. 🔄 Расширяем выделение до целых слов\n"
-        "4. 🔍 Находим фрагменты в тексте\n"
-        "5. ✏️ Применяем форматирование\n"
-        "6. ✅ Проверяем целостность\n\n"
+        "2. 📋 Получаем позиции форматирования из Telegram API\n"
+        "3. 🔍 Забираем текст по этим позициям (в Telegram)\n"
+        "4. 📄 Копируем текст в MAX (болванка)\n"
+        "5. 🔎 Ищем этот же текст в болванке MAX\n"
+        "6. 📍 Определяем позиции в MAX\n"
+        "7. ✏️ Применяем форматирование\n"
+        "8. ✅ Проверяем целостность\n\n"
         "📊 Статистика: /stats"
     )
 
@@ -816,10 +747,15 @@ async def cleanup():
 # === ЗАПУСК ===
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК БОТА С РАСШИРЕНИЕМ ДО СЛОВ ✨✨✨")
-    logger.info("✅ Коррекция позиций с учётом эмодзи")
-    logger.info("✅ Расширение до целых слов")
-    logger.info("✅ Проверка целостности")
+    logger.info("✨✨✨ ЗАПУСК БОТА С ВАШИМ АЛГОРИТМОМ ✨✨✨")
+    logger.info("✅ ШАГ 1: Оригинальный текст в Telegram")
+    logger.info("✅ ШАГ 2: Получаем позиции из Telegram API")
+    logger.info("✅ ШАГ 3: Забираем текст по этим позициям")
+    logger.info("✅ ШАГ 4: Копируем в MAX (болванка)")
+    logger.info("✅ ШАГ 5: Ищем текст в болванке")
+    logger.info("✅ ШАГ 6: Определяем позиции в MAX")
+    logger.info("✅ ШАГ 7: Применяем форматирование")
+    logger.info("✅ ШАГ 8: Проверяем целостность")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
