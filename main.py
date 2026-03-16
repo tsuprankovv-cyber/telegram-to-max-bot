@@ -105,6 +105,13 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
+# === ФУНКЦИЯ ДЛЯ ОЧИСТКИ ТЕКСТА ОТ HTML ===
+def strip_html(text: str) -> str:
+    """Удаляет все HTML-теги из текста"""
+    clean = re.sub(r'<[^>]+>', '', text)
+    logger.debug(f"🧹 Очистка HTML: {len(text)} -> {len(clean)} символов")
+    return clean
+
 # === ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ЭТАЛОНА ===
 def create_expected_formatting(text: str, entities: list) -> List[Dict]:
     """
@@ -120,142 +127,145 @@ def create_expected_formatting(text: str, entities: list) -> List[Dict]:
             'type': e.type,
             'text': fragment,
             'length': len(fragment),
+            'start': e.offset,
+            'end': e.offset + e.length,
             'url': getattr(e, 'url', None)
         })
-        logger.debug(f"  Эталон {i}: {e.type} '{fragment[:50]}...'")
+        logger.debug(f"  Эталон {i}: {e.type} [{e.offset}:{e.offset+e.length}] '{fragment[:50]}...'")
     
     return expected
 
-# === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ПО ЭТАЛОНУ ===
-def validate_against_expected(formatted_text: str, expected: List[Dict]) -> Tuple[bool, List[str]]:
+# === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ЦЕЛОСТНОСТИ ТЕКСТА ===
+def verify_text_integrity(original: str, formatted: str) -> Tuple[bool, str, List[str]]:
     """
-    Проверяет, соответствует ли отформатированный текст эталону
-    Возвращает (успех, список ошибок)
+    Проверяет, что текст не изменился после форматирования
+    Возвращает (успех, очищенный текст, список расхождений)
     """
-    logger.debug("\n🔍 ПРОВЕРКА ПО ЭТАЛОНУ:")
-    errors = []
-    success = True
+    logger.debug("\n🔍 ПРОВЕРКА ЦЕЛОСТНОСТИ ТЕКСТА:")
     
-    for exp in expected:
-        # Определяем паттерн для поиска в зависимости от типа
-        if exp['type'] == 'bold':
-            pattern = f"<b>(.*?)</b>"
-        elif exp['type'] == 'italic':
-            pattern = f"<i>(.*?)</i>"
-        elif exp['type'] == 'underline':
-            pattern = f"<u>(.*?)</u>"
-        elif exp['type'] == 'strikethrough':
-            pattern = f"<s>(.*?)</s>"
-        elif exp['type'] == 'code':
-            pattern = f"<code>(.*?)</code>"
-        elif exp['type'] == 'pre':
-            pattern = f"<pre>(.*?)</pre>"
-        elif exp['type'] == 'blockquote':
-            pattern = f"<blockquote>(.*?)</blockquote>"
-        elif exp['type'] == 'text_link':
-            pattern = f'<a[^>]*>(.*?)</a>'
-        else:
-            continue
-        
-        # Ищем все вхождения
-        matches = re.findall(pattern, formatted_text, re.DOTALL)
-        
-        found = False
-        for match in matches:
-            if exp['text'] in match:
-                found = True
-                logger.debug(f"  ✅ {exp['type']} {exp['id']}: найден '{match[:50]}...'")
-                break
-        
-        if not found:
-            # Пробуем искать без учета пробелов
-            exp_clean = re.sub(r'\s+', ' ', exp['text']).strip()
-            for match in matches:
-                match_clean = re.sub(r'\s+', ' ', match).strip()
-                if exp_clean in match_clean:
-                    found = True
-                    logger.debug(f"  ⚠️ {exp['type']} {exp['id']}: найден с расхождениями в пробелах")
+    # Удаляем все теги
+    clean = strip_html(formatted)
+    
+    # Построчное сравнение для лучшего логирования
+    orig_lines = original.split('\n')
+    clean_lines = clean.split('\n')
+    
+    differences = []
+    
+    if len(orig_lines) != len(clean_lines):
+        differences.append(f"Разное количество строк: {len(orig_lines)} vs {len(clean_lines)}")
+    
+    for i, (orig_line, clean_line) in enumerate(zip(orig_lines, clean_lines)):
+        if orig_line != clean_line:
+            differences.append(f"Строка {i}:")
+            differences.append(f"  Оригинал: '{orig_line}'")
+            differences.append(f"  Очищенный: '{clean_line}'")
+            
+            # Поиск различий по символам
+            for j, (oc, cc) in enumerate(zip(orig_line, clean_line)):
+                if oc != cc:
+                    differences.append(f"    Позиция {j}: '{oc}' vs '{cc}'")
                     break
-            
-            if not found:
-                errors.append(f"{exp['type']} {exp['id']}: '{exp['text'][:50]}...'")
-                logger.error(f"  ❌ {exp['type']} {exp['id']}: НЕ НАЙДЕН")
-                success = False
     
-    return success, errors
+    if differences:
+        logger.error("❌ Текст изменился после форматирования!")
+        for diff in differences:
+            logger.error(f"  {diff}")
+        return False, clean, differences
+    else:
+        logger.debug("✅ Текст не изменился")
+        return True, clean, []
 
-# === ФУНКЦИЯ ДЛЯ ФОРМАТИРОВАНИЯ ПО ЭТАЛОНУ ===
-def format_by_expected(original_text: str, expected: List[Dict]) -> str:
+# === ФУНКЦИЯ ДЛЯ ВЫРАВНИВАНИЯ ФОРМАТИРОВАНИЯ ===
+def align_formatting(original: str, formatted: str, expected: List[Dict]) -> str:
     """
-    Форматирует текст, используя эталон (поиск по тексту, а не по позициям)
+    Выравнивает форматирование так, чтобы текст полностью совпадал с оригиналом
     """
-    logger.debug("\n✏️ ФОРМАТИРОВАНИЕ ПО ЭТАЛОНУ:")
+    logger.debug("\n🔄 ВЫРАВНИВАНИЕ ФОРМАТИРОВАНИЯ:")
     
-    result = original_text
+    # Получаем очищенный текст
+    clean = strip_html(formatted)
     
-    # Сначала обрабатываем ссылки (чтобы не перекрывались с другими тегами)
-    for exp in expected:
-        if exp['type'] == 'text_link':
-            pos = result.find(exp['text'])
+    # Если очищенный текст не совпадает с оригиналом, начинаем с чистого листа
+    if clean != original:
+        logger.warning("⚠️ Текст изменился, начинаем форматирование заново")
+        
+        # Сортируем эталоны от конца к началу
+        sorted_expected = sorted(expected, key=lambda x: -x['start'])
+        
+        result = original
+        applied_count = 0
+        
+        for exp in sorted_expected:
+            # Ищем точное вхождение текста в оригинале
+            pos = original.find(exp['text'])
             if pos != -1:
-                replacement = f'<a href="{exp["url"]}">{exp["text"]}</a>'
+                logger.debug(f"  Найден '{exp['text'][:30]}...' на позиции {pos}")
+                
+                # Определяем теги
+                if exp['type'] == 'bold':
+                    replacement = f"<b>{exp['text']}</b>"
+                elif exp['type'] == 'italic':
+                    replacement = f"<i>{exp['text']}</i>"
+                elif exp['type'] == 'underline':
+                    replacement = f"<u>{exp['text']}</u>"
+                elif exp['type'] == 'strikethrough':
+                    replacement = f"<s>{exp['text']}</s>"
+                elif exp['type'] == 'code':
+                    replacement = f"<code>{exp['text']}</code>"
+                elif exp['type'] == 'pre':
+                    replacement = f"<pre>{exp['text']}</pre>"
+                elif exp['type'] == 'blockquote':
+                    replacement = f"<blockquote>{exp['text']}</blockquote>"
+                elif exp['type'] == 'text_link':
+                    replacement = f'<a href="{exp["url"]}">{exp["text"]}</a>'
+                else:
+                    continue
+                
+                # Применяем к результату
                 result = result[:pos] + replacement + result[pos + len(exp['text']):]
-                logger.debug(f"  🔗 Ссылка '{exp['text'][:30]}...' на позиции {pos}")
-    
-    # Потом остальные типы (в порядке убывания длины, чтобы не перекрывались)
-    sorted_expected = sorted(expected, key=lambda x: -len(x['text']))
-    
-    for exp in sorted_expected:
-        if exp['type'] == 'text_link':
-            continue
+                applied_count += 1
+                logger.debug(f"  ✅ Применен {exp['type']} на позиции {pos}")
         
-        # Определяем теги
-        if exp['type'] == 'bold':
-            open_tag, close_tag = '<b>', '</b>'
-        elif exp['type'] == 'italic':
-            open_tag, close_tag = '<i>', '</i>'
-        elif exp['type'] == 'underline':
-            open_tag, close_tag = '<u>', '</u>'
-        elif exp['type'] == 'strikethrough':
-            open_tag, close_tag = '<s>', '</s>'
-        elif exp['type'] == 'code':
-            open_tag, close_tag = '<code>', '</code>'
-        elif exp['type'] == 'pre':
-            open_tag, close_tag = '<pre>', '</pre>'
-        elif exp['type'] == 'blockquote':
-            open_tag, close_tag = '<blockquote>', '</blockquote>'
-        else:
-            continue
-        
-        # Ищем точное вхождение текста
-        pos = result.find(exp['text'])
-        if pos != -1:
-            replacement = f"{open_tag}{exp['text']}{close_tag}"
-            result = result[:pos] + replacement + result[pos + len(exp['text']):]
-            logger.debug(f"  ✅ {exp['type']} '{exp['text'][:30]}...' на позиции {pos}")
-        else:
-            # Пробуем искать без учета пробелов
-            result_clean = re.sub(r'\s+', ' ', result)
-            exp_clean = re.sub(r'\s+', ' ', exp['text'])
-            
-            # Это сложнее, нужно найти соответствие в оригинале
-            logger.warning(f"  ⚠️ {exp['type']} не найден точно, пропускаем")
+        logger.debug(f"  Применено {applied_count} форматирований")
+        return result
     
-    return result
+    # Если текст не изменился, проверяем позиции тегов
+    logger.debug("📊 Проверка позиций тегов:")
+    
+    # Находим все теги в форматированном тексте
+    tag_pattern = r'(<[^>]+>)(.*?)(</[^>]+>)'
+    tags = []
+    
+    for match in re.finditer(tag_pattern, formatted, re.DOTALL):
+        open_tag, content, close_tag = match.groups()
+        tags.append({
+            'open': open_tag,
+            'content': content,
+            'close': close_tag,
+            'start': match.start(),
+            'end': match.end()
+        })
+        logger.debug(f"  Тег: {open_tag}{content[:30]}...{close_tag} на [{match.start()}:{match.end()}]")
+    
+    return formatted
 
 # === ОСНОВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
 def format_text(text: str, entities: list) -> str:
     """
-    МНОГОУРОВНЕВАЯ СИСТЕМА ФОРМАТИРОВАНИЯ С ПРОВЕРКОЙ ПО ЭТАЛОНУ
+    МНОГОУРОВНЕВАЯ СИСТЕМА ФОРМАТИРОВАНИЯ С ВЫРАВНИВАНИЕМ
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ С ПРОВЕРКОЙ ПО ЭТАЛОНУ")
+    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ С ВЫРАВНИВАНИЕМ")
+    logger.debug(f"📝 Исходный текст: {repr(text[:200])}...")
     
-    # ШАГ 1: Создаем эталон (что ДОЛЖНО получиться)
+    # ШАГ 1: Создаем эталон
     expected = create_expected_formatting(text, entities)
     
-    # ШАГ 2: Пробуем прямое форматирование с сортировкой от конца
+    # ШАГ 2: Пробуем прямое форматирование
     logger.debug("\n📝 ПРЯМОЕ ФОРМАТИРОВАНИЕ:")
+    
+    # Сортируем от конца к началу
     sorted_entities = sorted(entities, key=lambda e: e.offset + e.length, reverse=True)
     direct_result = text
     
@@ -264,39 +274,34 @@ def format_text(text: str, entities: list) -> str:
         
         if e.type == "bold":
             direct_result = direct_result[:e.offset] + f"<b>{fragment}</b>" + direct_result[e.offset + e.length:]
-            logger.debug(f"  ✅ bold: '{fragment[:50]}...'")
+            logger.debug(f"  ✅ bold [{e.offset}:{e.offset+e.length}] '{fragment[:30]}...'")
         elif e.type == "italic":
             direct_result = direct_result[:e.offset] + f"<i>{fragment}</i>" + direct_result[e.offset + e.length:]
-            logger.debug(f"  ✅ italic: '{fragment[:50]}...'")
+            logger.debug(f"  ✅ italic [{e.offset}:{e.offset+e.length}] '{fragment[:30]}...'")
         elif e.type == "text_link":
             direct_result = direct_result[:e.offset] + f'<a href="{e.url}">{fragment}</a>' + direct_result[e.offset + e.length:]
-            logger.debug(f"  🔗 link: '{fragment[:50]}...'")
+            logger.debug(f"  🔗 link [{e.offset}:{e.offset+e.length}] '{fragment[:30]}...'")
         # ... остальные типы
     
-    # ШАГ 3: Проверяем прямой результат по эталону
-    direct_success, direct_errors = validate_against_expected(direct_result, expected)
+    # ШАГ 3: Проверяем целостность текста
+    integrity_ok, clean_text, differences = verify_text_integrity(text, direct_result)
     
-    if direct_success:
-        logger.debug("\n✅ Прямое форматирование успешно")
-        return direct_result
+    if not integrity_ok:
+        logger.warning("\n⚠️ Прямое форматирование нарушило текст, применяем выравнивание")
+        aligned_result = align_formatting(text, direct_result, expected)
+        
+        # ШАГ 4: Финальная проверка
+        final_ok, final_clean, _ = verify_text_integrity(text, aligned_result)
+        
+        if final_ok:
+            logger.debug("\n✅ Выравнивание успешно")
+            return aligned_result
+        else:
+            logger.error("\n❌ КРИТИЧЕСКАЯ ОШИБКА: не удалось сохранить текст")
+            return text
     
-    # ШАГ 4: Если не успешно - форматируем по эталону
-    logger.warning("\n⚠️ Прямое форматирование не прошло проверку, применяем эталонное")
-    for error in direct_errors:
-        logger.warning(f"  {error}")
-    
-    expected_result = format_by_expected(text, expected)
-    
-    # ШАГ 5: Проверяем эталонный результат
-    expected_success, expected_errors = validate_against_expected(expected_result, expected)
-    
-    if expected_success:
-        logger.debug("\n✅ Эталонное форматирование успешно")
-        return expected_result
-    else:
-        # ШАГ 6: Экстренный случай - возвращаем как есть
-        logger.error("\n❌ КРИТИЧЕСКАЯ ОШИБКА: форматирование не удалось")
-        return text
+    logger.debug("\n✅ Прямое форматирование успешно")
+    return direct_result
 
 class MediaUploader:
     """Загрузчик медиа"""
@@ -656,7 +661,7 @@ async def forward(message: types.Message):
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Форматируем текст с проверкой по эталону
+        # Форматируем текст с выравниванием
         formatted_text = format_text(text, entities)
         logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
@@ -693,7 +698,7 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Форматируем подпись с проверкой по эталону
+        # Форматируем подпись с выравниванием
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
@@ -717,11 +722,11 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **БОТ С ПРОВЕРКОЙ ПО ЭТАЛОНУ**\n\n"
+        "✅ **БОТ С ВЫРАВНИВАНИЕМ**\n\n"
         "📋 **ОСОБЕННОСТИ:**\n"
         "• 📋 Создание эталона из исходного текста\n"
-        "• 🔍 Проверка результата по эталону\n"
-        "• ✏️ Форматирование по эталону при ошибках\n"
+        "• 🔍 Проверка целостности текста\n"
+        "• 🔄 Автоматическое выравнивание\n"
         "• 📊 Максимальное логирование\n\n"
         "📊 Статистика: /stats"
     )
@@ -745,10 +750,10 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК БОТА С ПРОВЕРКОЙ ПО ЭТАЛОНУ ✨✨✨")
-    logger.info("✅ Создание эталона из исходного текста")
-    logger.info("✅ Проверка результата по эталону")
-    logger.info("✅ Форматирование по эталону при ошибках")
+    logger.info("✨✨✨ ЗАПУСК БОТА С ВЫРАВНИВАНИЕМ ✨✨✨")
+    logger.info("✅ Проверка целостности текста")
+    logger.info("✅ Автоматическое выравнивание")
+    logger.info("✅ Максимальное логирование")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
