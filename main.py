@@ -104,7 +104,7 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# ========== МЕТОД 1: ОПРЕДЕЛЕНИЕ ШИРИНЫ СИМВОЛОВ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
+# ========== МЕТОД 1: ОПРЕДЕЛЕНИЕ ШИРИНЫ СИМВОЛОВ ==========
 
 def get_char_width(char: str, pos: int = None) -> int:
     """
@@ -153,7 +153,7 @@ def get_char_width(char: str, pos: int = None) -> int:
     logger.debug(f"    📍 Символ '{char}'{pos_info} - обычный символ, ширина 1")
     return 1
 
-# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
+# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ (ИСПРАВЛЕНО) ==========
 
 def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     """
@@ -176,7 +176,8 @@ def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
         tg_to_py[tg_pos] = py_pos
         
         width = get_char_width(char, py_pos)
-        logger.debug(f"{py_pos:<8} '{char':<10} {tg_pos:<10} {width:<6}")
+        # ИСПРАВЛЕНО: правильное экранирование кавычек
+        logger.debug(f"{py_pos:<8} '{char}' {'':<6} {tg_pos:<10} {width:<6}")
         
         tg_pos += width
     
@@ -189,7 +190,7 @@ def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     
     return py_to_tg, tg_to_py
 
-# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
+# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ ==========
 
 def correct_entity_position(tg_start: int, tg_length: int, 
                            tg_to_py: Dict[int, int], 
@@ -206,14 +207,10 @@ def correct_entity_position(tg_start: int, tg_length: int,
     
     # Находим Python-позицию для начала - берем БЛИЖАЙШУЮ СЛЕВА
     py_start = None
-    last_py = 0
     for tg_pos in tg_positions:
         if tg_pos <= tg_start:
             py_start = tg_to_py[tg_pos]
             logger.debug(f"     Проверка tg_pos={tg_pos} -> py_pos={py_start} (подходит)")
-        else:
-            logger.debug(f"     Проверка tg_pos={tg_pos} -> больше не подходит")
-            break
     
     if py_start is None:
         py_start = 0
@@ -913,7 +910,7 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **БОТ ГОТОВ**\n\n"
+        "✅ **БОТ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ**\n\n"
         "📊 Статистика: /stats"
     )
 
