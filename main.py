@@ -105,117 +105,46 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ 100% СОВПАДЕНИЯ ===
-def verify_exact_match(original: str, formatted: str) -> Tuple[bool, str, List[str]]:
+# === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ПО ТЕКСТУ (НЕ ПО ПОЗИЦИЯМ) ===
+def verify_by_text(original: str, formatted: str) -> Tuple[bool, str]:
     """
-    Проверяет, совпадает ли очищенный отформатированный текст с оригиналом на 100%
-    Возвращает (успех, очищенный текст, список расхождений)
+    Проверяет, совпадает ли текст после удаления тегов с оригиналом
+    Только по тексту, никаких позиций!
     """
-    logger.debug("\n🔍 ПРОВЕРКА 100% СОВПАДЕНИЯ:")
+    logger.debug("\n🔍 ПРОВЕРКА ПО ТЕКСТУ:")
     
-    # Удаляем все теги из форматированного текста
+    # Удаляем все теги
     clean = re.sub(r'<[^>]+>', '', formatted)
     
-    differences = []
-    
     if clean == original:
-        logger.debug("✅ Текст совпадает на 100%!")
-        return True, clean, differences
+        logger.debug("✅ Текст совпадает 100%!")
+        return True, clean
     
-    # Если не совпадает, ищем расхождения
-    logger.warning("⚠️ Текст НЕ совпадает! Ищем расхождения...")
-    
-    # Сравниваем посимвольно
-    min_len = min(len(clean), len(original))
-    for i in range(min_len):
-        if clean[i] != original[i]:
-            diff = f"Позиция {i}: '{clean[i]}' vs '{original[i]}'"
-            differences.append(diff)
-            logger.warning(f"  {diff}")
-            break
-    
-    if len(clean) != len(original):
-        diff = f"Разная длина: {len(clean)} vs {len(original)}"
-        differences.append(diff)
-        logger.warning(f"  {diff}")
-    
-    return False, clean, differences
+    logger.error("❌ Текст НЕ совпадает!")
+    logger.error(f"   Оригинал: {original[:100]}...")
+    logger.error(f"   Очищенный: {clean[:100]}...")
+    return False, clean
 
-# === ФУНКЦИЯ ДЛЯ ПРИМЕНЕНИЯ ФОРМАТИРОВАНИЯ К БОЛВАНКЕ ===
-def apply_formatting_to_blank(blank_text: str, fragments: List[Dict]) -> str:
-    """
-    Применяет форматирование к чистой болванке
-    """
-    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ К БОЛВАНКЕ:")
-    
-    result = blank_text
-    
-    for i, f in enumerate(fragments):
-        # Ищем точное вхождение фрагмента
-        pos = result.find(f['text'])
-        
-        if pos != -1:
-            # Показываем контекст для уверенности
-            context_start = max(0, pos - 20)
-            context_end = min(len(result), pos + len(f['text']) + 20)
-            context = result[context_start:context_end]
-            logger.debug(f"\n  Фрагмент {i} ({f['type']}):")
-            logger.debug(f"    Текст: '{f['text'][:50]}...'")
-            logger.debug(f"    Позиция: {pos}")
-            logger.debug(f"    Контекст: ...{context}...")
-            
-            # Применяем соответствующие теги
-            if f['type'] == "bold":
-                replacement = f"<b>{f['text']}</b>"
-                logger.debug(f"    🔧 Применяем жирный")
-            elif f['type'] == "italic":
-                replacement = f"<i>{f['text']}</i>"
-                logger.debug(f"    🔧 Применяем курсив")
-            elif f['type'] == "underline":
-                replacement = f"<u>{f['text']}</u>"
-            elif f['type'] == "strikethrough":
-                replacement = f"<s>{f['text']}</s>"
-            elif f['type'] == "code":
-                replacement = f"<code>{f['text']}</code>"
-            elif f['type'] == "pre":
-                replacement = f"<pre>{f['text']}</pre>"
-            elif f['type'] == "blockquote":
-                replacement = f"<blockquote>{f['text']}</blockquote>"
-            elif f['type'] == "text_link":
-                replacement = f'<a href="{f["url"]}">{f["text"]}</a>'
-                logger.debug(f"    🔗 Применяем ссылку")
-            else:
-                logger.debug(f"    ⏭️ Неподдерживаемый тип: {f['type']}")
-                continue
-            
-            # Применяем замену
-            result = result[:pos] + replacement + result[pos + len(f['text']):]
-            logger.debug(f"    ✅ Применено")
-        else:
-            logger.error(f"\n  ❌ Фрагмент {i} НЕ НАЙДЕН в тексте!")
-            logger.error(f"     Искали: '{f['text'][:50]}...'")
-    
-    return result
-
-# === ГЛАВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ - ВАШ АЛГОРИТМ ===
+# === ГЛАВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ - ТОЛЬКО ТЕКСТ, БЕЗ ПОЗИЦИЙ ===
 def format_text(telegram_text: str, entities: list) -> str:
     """
     ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ:
-    
-    ШАГ 1: Получаем из Telegram текст и entities
-    ШАГ 2: Создаем чистую болванку (тот же текст, но без форматирования)
-    ШАГ 3: Из entities извлекаем фрагменты, которые были отформатированы
-    ШАГ 4: Находим эти фрагменты в болванке
-    ШАГ 5: Применяем к ним форматирование
-    ШАГ 6: Проверяем 100% совпадение с оригиналом
+    1. Чистая болванка = текст из Telegram (без изменений)
+    2. Собираем фрагменты, которые были отформатированы
+    3. Применяем форматирование (простая замена текста)
+    4. Проверяем по тексту (не по позициям!)
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug(f"🔍 ВАШ АЛГОРИТМ: ФОРМАТИРОВАНИЕ С ПРОВЕРКОЙ 100%")
-    logger.debug(f"📝 Исходный текст из Telegram: {repr(telegram_text[:200])}...")
+    logger.debug(f"🔍 ФОРМАТИРОВАНИЕ: ТОЛЬКО ТЕКСТ, БЕЗ ПОЗИЦИЙ")
+    logger.debug(f"📝 Исходный текст: {repr(telegram_text[:200])}...")
     
-    # ШАГ 1: Извлекаем отформатированные фрагменты из Telegram
+    # ШАГ 1: Чистая болванка (просто копируем текст)
+    result = telegram_text
+    logger.debug(f"\n📄 Чистая болванка: {result[:100]}...")
+    
+    # ШАГ 2: Собираем фрагменты для форматирования
     fragments = []
-    logger.debug(f"\n📋 ИЗВЛЕЧЕНИЕ ФРАГМЕНТОВ ИЗ TELEGRAM:")
+    logger.debug(f"\n📋 ФРАГМЕНТЫ ДЛЯ ФОРМАТИРОВАНИЯ:")
     
     for i, e in enumerate(entities):
         # Проверяем границы
@@ -229,33 +158,55 @@ def format_text(telegram_text: str, entities: list) -> str:
             'id': i,
             'type': e.type,
             'text': fragment,
-            'url': getattr(e, 'url', None),
-            'telegram_start': e.offset,
-            'telegram_end': e.offset + e.length
+            'url': getattr(e, 'url', None)
         })
-        logger.debug(f"  Фрагмент {i}: {e.type} [{e.offset}:{e.offset+e.length}] '{fragment[:50]}...'")
+        logger.debug(f"  {i}: {e.type} '{fragment[:50]}...'")
     
-    # ШАГ 2: Создаем чистую болванку (тот же текст, но без форматирования)
-    blank_text = telegram_text
-    logger.debug(f"\n📄 ЧИСТАЯ БОЛВАНКА (без форматирования):")
-    logger.debug(f"  {blank_text[:100]}...")
+    # ШАГ 3: Применяем форматирование (ПРОСТАЯ ЗАМЕНА ТЕКСТА)
+    logger.debug(f"\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
     
-    # ШАГ 3: Применяем форматирование к болванке
-    formatted_text = apply_formatting_to_blank(blank_text, fragments)
+    for f in fragments:
+        # Проверяем, есть ли такой текст в результате
+        if f['text'] in result:
+            # Применяем нужный тип форматирования
+            if f['type'] == "bold":
+                result = result.replace(f['text'], f"<b>{f['text']}</b>")
+                logger.debug(f"  ✅ Жирный: '{f['text'][:30]}...'")
+            elif f['type'] == "italic":
+                result = result.replace(f['text'], f"<i>{f['text']}</i>")
+                logger.debug(f"  ✅ Курсив: '{f['text'][:30]}...'")
+            elif f['type'] == "underline":
+                result = result.replace(f['text'], f"<u>{f['text']}</u>")
+                logger.debug(f"  ✅ Подчеркнутый: '{f['text'][:30]}...'")
+            elif f['type'] == "strikethrough":
+                result = result.replace(f['text'], f"<s>{f['text']}</s>")
+                logger.debug(f"  ✅ Зачеркнутый: '{f['text'][:30]}...'")
+            elif f['type'] == "code":
+                result = result.replace(f['text'], f"<code>{f['text']}</code>")
+                logger.debug(f"  ✅ Код: '{f['text'][:30]}...'")
+            elif f['type'] == "pre":
+                result = result.replace(f['text'], f"<pre>{f['text']}</pre>")
+                logger.debug(f"  ✅ Преформат: '{f['text'][:30]}...'")
+            elif f['type'] == "blockquote":
+                result = result.replace(f['text'], f"<blockquote>{f['text']}</blockquote>")
+                logger.debug(f"  ✅ Цитата: '{f['text'][:30]}...'")
+            elif f['type'] == "text_link":
+                result = result.replace(f['text'], f'<a href="{f["url"]}">{f["text"]}</a>')
+                logger.debug(f"  🔗 Ссылка: '{f['text'][:30]}...' -> {f['url']}")
+            else:
+                logger.debug(f"  ⏭️ Неподдерживаемый тип: {f['type']}")
+        else:
+            logger.error(f"  ❌ Текст не найден: '{f['text'][:30]}...'")
     
-    # ШАГ 4: Проверяем 100% совпадение
-    match_ok, clean_text, differences = verify_exact_match(telegram_text, formatted_text)
+    # ШАГ 4: Проверка по тексту (не по позициям!)
+    match_ok, clean_text = verify_by_text(telegram_text, result)
     
     if match_ok:
-        logger.debug("\n✅ ИТОГ: 100% СОВПАДЕНИЕ С ОРИГИНАЛОМ!")
-        return formatted_text
+        logger.debug("\n✅ УСПЕХ: Текст совпадает с оригиналом!")
+        return result
     else:
-        logger.error("\n❌ ИТОГ: ТЕКСТ ИЗМЕНИЛСЯ! Что-то пошло не так.")
-        logger.error(f"   Оригинал: {telegram_text[:100]}...")
-        logger.error(f"   Очищенный: {clean_text[:100]}...")
-        
-        # ВАЖНО: Если текст изменился, значит алгоритм сработал неправильно
-        # Возвращаем оригинал без форматирования, чтобы не испортить
+        logger.error("\n❌ КРИТИЧЕСКАЯ ОШИБКА: Текст изменился!")
+        logger.error("   Возвращаем оригинал без форматирования")
         return telegram_text
 
 class MediaUploader:
@@ -614,9 +565,9 @@ async def forward(message: types.Message):
         text = message.text
         entities = message.entities or []
         
-        logger.info(f"📝 Исходный текст из Telegram: {text[:100]}...")
+        logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Применяем ВАШ АЛГОРИТМ
+        # Применяем форматирование (только по тексту, без позиций)
         formatted_text = format_text(text, entities)
         logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
@@ -653,9 +604,9 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Применяем ВАШ АЛГОРИТМ к подписи
+        # Форматируем подпись (только по тексту, без позиций)
         if message.caption and message.caption_entities:
-            logger.info(f"📝 Форматируем подпись по вашему алгоритму: {text[:100]}...")
+            logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
             logger.info(f"📝 После форматирования: {text[:100]}...")
         elif message.caption:
@@ -677,13 +628,12 @@ async def forward(message: types.Message):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **БОТ С ВАШИМ АЛГОРИТМОМ**\n\n"
-        "📋 **ПОСЛЕДОВАТЕЛЬНОСТЬ:**\n"
-        "1. 📄 Чистая болванка (текст без форматирования)\n"
-        "2. 📋 Извлечение фрагментов из Telegram\n"
-        "3. 🔍 Поиск фрагментов в болванке\n"
-        "4. ✏️ Применение форматирования\n"
-        "5. ✅ Проверка 100% совпадения\n\n"
+        "✅ **БОТ С ФОРМАТИРОВАНИЕМ ПО ТЕКСТУ**\n\n"
+        "📋 **ОСОБЕННОСТИ:**\n"
+        "• 🔍 Поиск только по тексту (никаких позиций)\n"
+        "• 📄 Чистая болванка без изменений\n"
+        "• ✅ Проверка по тексту, а не по позициям\n"
+        "• 📊 Максимальное логирование\n\n"
         "📊 Статистика: /stats"
     )
 
@@ -706,10 +656,9 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК БОТА С ВАШИМ АЛГОРИТМОМ ✨✨✨")
-    logger.info("✅ Чистая болванка из текста Telegram")
-    logger.info("✅ Поиск фрагментов по точному совпадению")
-    logger.info("✅ Проверка 100% совпадения")
+    logger.info("✨✨✨ ЗАПУСК БОТА С ФОРМАТИРОВАНИЕМ ПО ТЕКСТУ ✨✨✨")
+    logger.info("✅ Только поиск по тексту, никаких позиций")
+    logger.info("✅ Проверка по тексту после форматирования")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
