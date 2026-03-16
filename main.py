@@ -5,7 +5,6 @@ import aiohttp
 import json
 import mimetypes
 import re
-import sys
 import unicodedata
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -105,12 +104,102 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
+# === ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЗИЦИЯМИ ===
+
+def get_char_width(char: str) -> int:
+    """Определяет ширину символа в Telegram (2 для эмодзи, 1 для обычных)"""
+    code = ord(char)
+    # Эмодзи и спецсимволы
+    if 0x1F300 <= code <= 0x1F9FF or 0x2600 <= code <= 0x26FF or 0x2700 <= code <= 0x27BF:
+        return 2
+    # Специальные типографские символы
+    special = {'—': 2, '–': 2, '…': 2, '«': 1, '»': 1, '‑': 1}
+    if char in special:
+        return special[char]
+    # Широкие символы (китайские, японские и т.д.)
+    if unicodedata.east_asian_width(char) in ('W', 'F'):
+        return 2
+    return 1
+
+def build_position_map(text: str) -> Dict[int, int]:
+    """
+    Строит словарь: для каждой позиции в Python (индекс символа)
+    возвращает соответствующую позицию в Telegram (с учётом эмодзи).
+    """
+    pos_map = {}
+    tg_pos = 0
+    logger.debug("📊 Построение карты позиций:")
+    for py_pos, ch in enumerate(text):
+        pos_map[py_pos] = tg_pos
+        width = get_char_width(ch)
+        if width != 1:
+            logger.debug(f"  {py_pos}: '{ch}' -> tg_pos={tg_pos}, ширина={width}")
+        tg_pos += width
+    pos_map[len(text)] = tg_pos
+    logger.debug(f"📊 Всего позиций в Telegram: {tg_pos}, в Python: {len(text)}")
+    return pos_map
+
+def correct_entity(entity_start: int, entity_length: int, pos_map: Dict[int, int], text_len: int) -> Tuple[int, int]:
+    """
+    Преобразует Telegram-позиции в Python-позиции, используя карту.
+    Возвращает (start_py, length_py).
+    """
+    # Находим Python-позицию для начала
+    start_py = None
+    for py_pos, tg_pos in pos_map.items():
+        if py_pos == text_len:
+            continue
+        if tg_pos >= entity_start:
+            start_py = py_pos
+            break
+    if start_py is None:
+        return None, None
+
+    # Определяем конец в Telegram
+    tg_end = entity_start + entity_length
+    # Находим Python-позицию для конца
+    end_py = None
+    for py_pos, tg_pos in pos_map.items():
+        if tg_pos >= tg_end:
+            end_py = py_pos
+            break
+    if end_py is None:
+        end_py = text_len
+
+    length_py = end_py - start_py
+    if length_py <= 0:
+        return None, None
+    return start_py, length_py
+
+# === ФУНКЦИЯ ДЛЯ РАСШИРЕНИЯ ДО ЦЕЛЫХ СЛОВ ===
+
+def expand_to_word(text: str, start: int, end: int) -> Tuple[int, int]:
+    """
+    Расширяет выделение до границ целого слова
+    """
+    original_start, original_end = start, end
+    
+    # Расширяем влево до начала слова
+    while start > 0 and (text[start-1].isalnum() or text[start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+        start -= 1
+    
+    # Расширяем вправо до конца слова
+    while end < len(text) and (text[end].isalnum() or text[end] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+        end += 1
+    
+    if start != original_start or end != original_end:
+        logger.debug(f"  🔄 Расширение слова: [{original_start}:{original_end}] -> [{start}:{end}]")
+        logger.debug(f"     Было: '{text[original_start:original_end]}'")
+        logger.debug(f"     Стало: '{text[start:end]}'")
+    
+    return start, end
+
 # === ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ЦЕЛОСТНОСТИ ТЕКСТА ===
+
 def verify_text_integrity(original: str, formatted: str) -> bool:
     """
     Проверяет, что текст не изменился после форматирования
     """
-    # Удаляем все теги
     clean = re.sub(r'<[^>]+>', '', formatted)
     
     if clean == original:
@@ -121,106 +210,156 @@ def verify_text_integrity(original: str, formatted: str) -> bool:
         logger.error(f"   Оригинал: {original[:100]}...")
         logger.error(f"   Результат: {clean[:100]}...")
         
-        # Показываем различия
+        # Поиск первого расхождения
         for i, (oc, cc) in enumerate(zip(original, clean)):
             if oc != cc:
                 logger.error(f"   Первое различие на позиции {i}: '{oc}' vs '{cc}'")
                 break
-        
         return False
 
-# === ГЛАВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
+# === ОСНОВНАЯ ФУНКЦИЯ ФОРМАТИРОВАНИЯ ===
+
 def format_text(telegram_text: str, entities: list) -> str:
     """
-    ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ:
-    
-    1. Чистая болванка = копия текста из Telegram
-    2. Извлекаем из entities ТОЛЬКО информацию о том, ЧТО и КАК форматировать
-    3. Находим эти фрагменты в тексте (по точному совпадению)
-    4. Применяем форматирование
-    5. Проверяем, что текст не изменился
+    ВАШ АЛГОРИТМ С ОГРАНИЧЕНИЕМ НА ЦЕЛЫЕ СЛОВА:
+    1. Корректируем позиции с учётом эмодзи
+    2. Расширяем выделение до целых слов
+    3. Получаем правильные фрагменты текста
+    4. Находим их в исходном тексте
+    5. Применяем форматирование (от конца к началу)
+    6. Проверяем целостность
     """
     logger.debug(f"\n{'='*60}")
-    logger.debug(f"🔍 ВАШ ИДЕАЛЬНЫЙ АЛГОРИТМ")
+    logger.debug("🔍 ФОРМАТИРОВАНИЕ С РАСШИРЕНИЕМ ДО СЛОВ")
     logger.debug(f"📝 Исходный текст: {repr(telegram_text[:200])}...")
     
-    # ШАГ 1: Чистая болванка (копия текста)
-    result = telegram_text
-    logger.debug(f"\n📄 Чистая болванка: {result[:100]}...")
+    # ШАГ 1: Строим карту позиций
+    pos_map = build_position_map(telegram_text)
     
-    # ШАГ 2: Извлекаем фрагменты для форматирования
+    # ШАГ 2: Корректируем и расширяем entities
     fragments = []
-    logger.debug(f"\n📋 ФРАГМЕНТЫ ДЛЯ ФОРМАТИРОВАНИЯ (из Telegram):")
+    logger.debug("\n📋 КОРРЕКЦИЯ И РАСШИРЕНИЕ:")
     
     for i, e in enumerate(entities):
-        # Проверяем границы
-        if e.offset + e.length > len(telegram_text):
-            logger.warning(f"  ⚠️ Entity {i} выходит за границы, пропускаем")
+        # Корректируем позиции
+        py_start, py_length = correct_entity(e.offset, e.length, pos_map, len(telegram_text))
+        if py_start is None:
+            logger.warning(f"  ⚠️ Entity {i} не удалось скорректировать, пропускаем")
             continue
         
-        # Получаем текст, который был отформатирован в Telegram
-        original_fragment = telegram_text[e.offset:e.offset + e.length]
+        # Расширяем до целого слова
+        new_start, new_end = expand_to_word(telegram_text, py_start, py_start + py_length)
+        fragment = telegram_text[new_start:new_end]
         
-        # Сохраняем только текст и тип форматирования (никаких позиций!)
+        if not fragment:
+            logger.warning(f"  ⚠️ Entity {i} дал пустой фрагмент, пропускаем")
+            continue
+        
         fragments.append({
             'id': i,
             'type': e.type,
-            'text': original_fragment,
+            'text': fragment,
             'url': getattr(e, 'url', None),
-            'length': len(original_fragment)
+            'start': new_start,
+            'end': new_end
         })
-        logger.debug(f"  {i}: {e.type} '{original_fragment[:50]}...'")
+        logger.debug(f"  {i}: {e.type} '{fragment[:50]}...'")
     
-    # ШАГ 3: Применяем форматирование
-    logger.debug(f"\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
+    # ШАГ 3: Находим позиции фрагментов в исходном тексте
+    positions = []
+    logger.debug("\n🔍 ПОИСК ФРАГМЕНТОВ В ТЕКСТЕ:")
     
     for f in fragments:
-        # Ищем текст в текущем результате
-        if f['text'] in result:
-            # Применяем соответствующие теги
-            if f['type'] == "bold":
-                result = result.replace(f['text'], f"<b>{f['text']}</b>")
-                logger.debug(f"  ✅ Жирный: '{f['text'][:30]}...'")
-            elif f['type'] == "italic":
-                result = result.replace(f['text'], f"<i>{f['text']}</i>")
-                logger.debug(f"  ✅ Курсив: '{f['text'][:30]}...'")
-            elif f['type'] == "underline":
-                result = result.replace(f['text'], f"<u>{f['text']}</u>")
-                logger.debug(f"  ✅ Подчеркнутый: '{f['text'][:30]}...'")
-            elif f['type'] == "strikethrough":
-                result = result.replace(f['text'], f"<s>{f['text']}</s>")
-                logger.debug(f"  ✅ Зачеркнутый: '{f['text'][:30]}...'")
-            elif f['type'] == "code":
-                result = result.replace(f['text'], f"<code>{f['text']}</code>")
-                logger.debug(f"  ✅ Код: '{f['text'][:30]}...'")
-            elif f['type'] == "pre":
-                result = result.replace(f['text'], f"<pre>{f['text']}</pre>")
-                logger.debug(f"  ✅ Преформат: '{f['text'][:30]}...'")
-            elif f['type'] == "blockquote":
-                result = result.replace(f['text'], f"<blockquote>{f['text']}</blockquote>")
-                logger.debug(f"  ✅ Цитата: '{f['text'][:30]}...'")
-            elif f['type'] == "text_link":
-                result = result.replace(f['text'], f'<a href="{f["url"]}">{f["text"]}</a>')
-                logger.debug(f"  🔗 Ссылка: '{f['text'][:30]}...'")
-            else:
-                logger.debug(f"  ⏭️ Неподдерживаемый тип: {f['type']}")
+        # Ищем точное вхождение текста
+        pos = telegram_text.find(f['text'])
+        if pos == -1:
+            logger.error(f"  ❌ Фрагмент '{f['text'][:30]}...' не найден!")
+            continue
+        
+        # Убеждаемся, что это целое слово (проверяем границы)
+        word_start = pos
+        word_end = pos + len(f['text'])
+        
+        # Проверяем, что это действительно отдельное слово
+        if word_start > 0 and (telegram_text[word_start-1].isalnum() or telegram_text[word_start-1] in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя-'):
+            logger.warning(f"  ⚠️ Фрагмент не начинается с границы слова, но мы уже расширили")
+        
+        positions.append({
+            'type': f['type'],
+            'text': f['text'],
+            'url': f['url'],
+            'start': word_start,
+            'end': word_end
+        })
+        logger.debug(f"  ✅ Найден '{f['text'][:30]}...' на позиции {word_start}")
+    
+    if not positions:
+        logger.error("❌ Ни одного фрагмента не найдено!")
+        return telegram_text
+    
+    # ШАГ 4: Сортируем от конца к началу
+    positions.sort(key=lambda x: -x['start'])
+    
+    # Применяем форматирование
+    result = list(telegram_text)
+    offset = 0
+    applied = []
+    
+    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
+    
+    for p in positions:
+        start = p['start'] + offset
+        end = p['end'] + offset
+        
+        # Определяем теги
+        if p['type'] == 'bold':
+            open_tag, close_tag = '<b>', '</b>'
+            logger.debug(f"  🔧 Жирный: '{p['text'][:30]}...'")
+        elif p['type'] == 'italic':
+            open_tag, close_tag = '<i>', '</i>'
+            logger.debug(f"  🔧 Курсив: '{p['text'][:30]}...'")
+        elif p['type'] == 'underline':
+            open_tag, close_tag = '<u>', '</u>'
+        elif p['type'] == 'strikethrough':
+            open_tag, close_tag = '<s>', '</s>'
+        elif p['type'] == 'code':
+            open_tag, close_tag = '<code>', '</code>'
+        elif p['type'] == 'pre':
+            open_tag, close_tag = '<pre>', '</pre>'
+        elif p['type'] == 'blockquote':
+            open_tag, close_tag = '<blockquote>', '</blockquote>'
+        elif p['type'] == 'text_link':
+            link_html = f'<a href="{p["url"]}">{p["text"]}</a>'
+            result[start:end] = list(link_html)
+            offset += len(link_html) - (end - start)
+            applied.append('link')
+            logger.debug(f"  🔗 Ссылка: '{p['text'][:30]}...'")
+            continue
         else:
-            logger.error(f"  ❌ Текст не найден: '{f['text'][:30]}...'")
+            logger.warning(f"  ⏭️ Неподдерживаемый тип: {p['type']}")
+            continue
+        
+        # Вставляем теги
+        result[end:end] = list(close_tag)
+        result[start:start] = list(open_tag)
+        offset += len(open_tag) + len(close_tag)
+        applied.append(p['type'])
     
-    # ШАГ 4: Проверяем целостность текста
-    logger.debug(f"\n🔍 ПРОВЕРКА ЦЕЛОСТНОСТИ:")
+    formatted = ''.join(result)
     
-    if verify_text_integrity(telegram_text, result):
-        logger.debug("\n✅ УСПЕХ: Текст сохранен, форматирование применено")
-        return result
+    # ШАГ 5: Проверка целостности
+    logger.debug("\n🔍 ПРОВЕРКА ЦЕЛОСТНОСТИ:")
+    
+    if verify_text_integrity(telegram_text, formatted):
+        logger.debug(f"\n✅ УСПЕХ: Применено {len(applied)} форматирований")
+        return formatted
     else:
-        logger.error("\n❌ КРИТИЧЕСКАЯ ОШИБКА: Текст изменился!")
-        logger.error("   Возвращаем оригинальный текст без форматирования")
+        logger.error("\n❌ ОШИБКА: Текст изменился, возвращаем оригинал")
         return telegram_text
 
+# === КЛАССЫ ДЛЯ РАБОТЫ С МЕДИА (без изменений) ===
+
 class MediaUploader:
-    """Загрузчик медиа"""
-    
     def __init__(self, token: str):
         self.token = token
         self.base_url = "https://platform-api.max.ru"
@@ -412,9 +551,11 @@ class TelegramDownloader:
             else:
                 raise Exception(f"Ошибка скачивания: {resp.status}")
 
-# Инициализируем
+# === ИНИЦИАЛИЗАЦИЯ ===
 uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
+
+# === ФУНКЦИИ ОТПРАВКИ ===
 
 async def send_to_max(text: str, attachments: List[dict] = None):
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
@@ -553,6 +694,8 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
     
     return text, attachments
 
+# === ОБРАБОТЧИК СООБЩЕНИЙ ===
+
 @dp.message()
 async def forward(message: types.Message):
     if message.chat.id != TELEGRAM_GROUP_ID:
@@ -576,7 +719,7 @@ async def forward(message: types.Message):
         
         logger.info(f"📝 Исходный текст: {text[:100]}...")
         
-        # Применяем ВАШ АЛГОРИТМ
+        # Применяем форматирование с расширением до слов
         formatted_text = format_text(text, entities)
         logger.info(f"📝 Текст после форматирования: {formatted_text[:100]}...")
         
@@ -613,7 +756,7 @@ async def forward(message: types.Message):
             })
             logger.info(f"🔘 Добавлено {len(buttons)} рядов кнопок")
         
-        # Применяем ВАШ АЛГОРИТМ к подписи
+        # Применяем форматирование к подписи
         if message.caption and message.caption_entities:
             logger.info(f"📝 Форматируем подпись: {text[:100]}...")
             text = format_text(text, message.caption_entities)
@@ -634,16 +777,19 @@ async def forward(message: types.Message):
     
     logger.warning(f"⚠️ Неподдерживаемый тип сообщения: {message.content_type}")
 
+# === КОМАНДЫ ===
+
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✅ **ВАШ ИДЕАЛЬНЫЙ БОТ**\n\n"
+        "✅ **БОТ С РАСШИРЕНИЕМ ДО СЛОВ**\n\n"
         "📋 **АЛГОРИТМ:**\n"
-        "1. 📄 Берём текст из Telegram (болванка)\n"
-        "2. 📋 Смотрим, какие фрагменты были отформатированы\n"
-        "3. 🔍 Находим эти же фрагменты в тексте\n"
-        "4. ✏️ Применяем форматирование\n"
-        "5. ✅ Проверяем, что текст не изменился\n\n"
+        "1. 📄 Берём текст из Telegram\n"
+        "2. 🔧 Корректируем позиции с учётом эмодзи\n"
+        "3. 🔄 Расширяем выделение до целых слов\n"
+        "4. 🔍 Находим фрагменты в тексте\n"
+        "5. ✏️ Применяем форматирование\n"
+        "6. ✅ Проверяем целостность\n\n"
         "📊 Статистика: /stats"
     )
 
@@ -659,18 +805,21 @@ async def show_stats(message: types.Message):
         f"🖼️ Фото: ✅ {stats['photo_ok']}"
     )
 
+# === ОЧИСТКА ===
+
 async def cleanup():
     if downloader.session:
         await downloader.session.close()
     if uploader.session:
         await uploader.session.close()
 
+# === ЗАПУСК ===
+
 async def main():
-    logger.info("✨✨✨ ЗАПУСК ВАШЕГО ИДЕАЛЬНОГО БОТА ✨✨✨")
-    logger.info("✅ Берём текст из Telegram")
-    logger.info("✅ Находим фрагменты по тексту")
-    logger.info("✅ Применяем форматирование")
-    logger.info("✅ Проверяем целостность")
+    logger.info("✨✨✨ ЗАПУСК БОТА С РАСШИРЕНИЕМ ДО СЛОВ ✨✨✨")
+    logger.info("✅ Коррекция позиций с учётом эмодзи")
+    logger.info("✅ Расширение до целых слов")
+    logger.info("✅ Проверка целостности")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
