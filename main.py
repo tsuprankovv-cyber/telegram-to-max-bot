@@ -153,7 +153,7 @@ def get_char_width(char: str, pos: int = None) -> int:
     logger.debug(f"    📍 Символ '{char}'{pos_info} - обычный символ, ширина 1")
     return 1
 
-# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ (ИСПРАВЛЕНО) ==========
+# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ ==========
 
 def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     """
@@ -176,7 +176,6 @@ def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
         tg_to_py[tg_pos] = py_pos
         
         width = get_char_width(char, py_pos)
-        # ИСПРАВЛЕНО: правильное экранирование кавычек
         logger.debug(f"{py_pos:<8} '{char}' {'':<6} {tg_pos:<10} {width:<6}")
         
         tg_pos += width
@@ -190,7 +189,7 @@ def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     
     return py_to_tg, tg_to_py
 
-# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ ==========
+# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ (ИСПРАВЛЕННАЯ) ==========
 
 def correct_entity_position(tg_start: int, tg_length: int, 
                            tg_to_py: Dict[int, int], 
@@ -205,31 +204,52 @@ def correct_entity_position(tg_start: int, tg_length: int,
     tg_positions = sorted(tg_to_py.keys())
     logger.debug(f"     Доступные Telegram позиции: {tg_positions}")
     
-    # Находим Python-позицию для начала - берем БЛИЖАЙШУЮ СЛЕВА
+    # Находим Python-позицию для начала - берем точное соответствие
     py_start = None
     for tg_pos in tg_positions:
-        if tg_pos <= tg_start:
+        if tg_pos == tg_start:
             py_start = tg_to_py[tg_pos]
-            logger.debug(f"     Проверка tg_pos={tg_pos} -> py_pos={py_start} (подходит)")
+            logger.debug(f"     Точное совпадение начала: tg_pos={tg_pos} -> py_start={py_start}")
+            break
     
     if py_start is None:
-        py_start = 0
-        logger.debug(f"     Не найдено, ставим py_start=0")
+        # Если нет точного, берем последнюю позицию ДО
+        last_py = 0
+        for tg_pos in tg_positions:
+            if tg_pos < tg_start:
+                last_py = tg_to_py[tg_pos]
+                logger.debug(f"     Позиция ДО: tg_pos={tg_pos} -> py_pos={last_py}")
+            else:
+                break
+        py_start = last_py
+        logger.debug(f"     Используем последнюю позицию ДО: py_start={py_start}")
     
-    # Находим Python-позицию для конца - берем БЛИЖАЙШУЮ СПРАВА
+    # Находим Python-позицию для конца - берем точное соответствие
     tg_end = tg_start + tg_length
     py_end = None
     
     logger.debug(f"     Ищем конец: tg_end={tg_end}")
     for tg_pos in tg_positions:
-        if tg_pos >= tg_end:
+        if tg_pos == tg_end:
             py_end = tg_to_py[tg_pos]
-            logger.debug(f"     Найдено: tg_pos={tg_pos} -> py_end={py_end}")
+            logger.debug(f"     Точное совпадение конца: tg_pos={tg_pos} -> py_end={py_end}")
             break
+    
+    if py_end is None:
+        # Если нет точного, берем первую позицию ПОСЛЕ
+        for tg_pos in tg_positions:
+            if tg_pos > tg_end:
+                py_end = tg_to_py[tg_pos]
+                logger.debug(f"     Первая позиция ПОСЛЕ: tg_pos={tg_pos} -> py_end={py_end}")
+                break
     
     if py_end is None:
         py_end = text_length
         logger.debug(f"     Не найдено, ставим py_end={text_length}")
+    
+    # Корректируем, чтобы не выходить за границы
+    if py_end > text_length:
+        py_end = text_length
     
     py_length = py_end - py_start
     logger.debug(f"     РЕЗУЛЬТАТ: Python start={py_start}, length={py_length}, end={py_end}")
