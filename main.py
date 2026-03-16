@@ -104,17 +104,19 @@ def extract_buttons(message: types.Message) -> list:
     
     return buttons
 
-# ========== МЕТОД 1: ОПРЕДЕЛЕНИЕ ШИРИНЫ СИМВОЛОВ ==========
+# ========== МЕТОД 1: ОПРЕДЕЛЕНИЕ ШИРИНЫ СИМВОЛОВ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
 
-def get_char_width(char: str) -> int:
+def get_char_width(char: str, pos: int = None) -> int:
     """
     Определяет реальную ширину символа в Telegram
     Возвращает 2 для эмодзи и спецсимволов, 1 для обычных
     """
     code = ord(char)
+    pos_info = f" на позиции {pos}" if pos is not None else ""
     
     # Вариационные селекторы (не занимают места)
     if 0xFE00 <= code <= 0xFE0F:
+        logger.debug(f"    📍 Символ '{char}'{pos_info} - вариационный селектор, ширина 0")
         return 0
     
     # Специальные типографские символы
@@ -125,6 +127,7 @@ def get_char_width(char: str) -> int:
     }
     
     if char in special_chars:
+        logger.debug(f"    📍 Символ '{char}'{pos_info} - спецсимвол, ширина {special_chars[char]}")
         return special_chars[char]
     
     # Диапазоны эмодзи
@@ -139,15 +142,18 @@ def get_char_width(char: str) -> int:
     
     for start, end in emoji_ranges:
         if start <= code <= end:
+            logger.debug(f"    📍 Символ '{char}'{pos_info} - эмодзи, ширина 2")
             return 2
     
     # Широкие символы (китайские, японские)
     if unicodedata.east_asian_width(char) in ('W', 'F'):
+        logger.debug(f"    📍 Символ '{char}'{pos_info} - широкий символ, ширина 2")
         return 2
     
+    logger.debug(f"    📍 Символ '{char}'{pos_info} - обычный символ, ширина 1")
     return 1
 
-# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ ==========
+# ========== МЕТОД 2: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
 
 def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     """
@@ -160,102 +166,108 @@ def build_position_maps(text: str) -> Tuple[Dict[int, int], Dict[int, int]]:
     tg_to_py = {}
     tg_pos = 0
     
-    logger.debug("📊 Построение карты позиций:")
+    logger.debug("\n📊 ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ (посимвольно):")
+    logger.debug("-" * 60)
+    logger.debug(f"{'Python':<8} {'Char':<10} {'TG start':<10} {'Width':<6}")
+    logger.debug("-" * 60)
+    
     for py_pos, char in enumerate(text):
         py_to_tg[py_pos] = tg_pos
         tg_to_py[tg_pos] = py_pos
         
-        width = get_char_width(char)
-        if width != 1:
-            logger.debug(f"  {py_pos}: '{char}' -> tg_pos={tg_pos}, ширина={width}")
+        width = get_char_width(char, py_pos)
+        logger.debug(f"{py_pos:<8} '{char':<10} {tg_pos:<10} {width:<6}")
         
         tg_pos += width
     
     # Добавляем конечную позицию
     tg_to_py[tg_pos] = len(text)
-    
-    logger.debug(f"📊 Всего позиций в Telegram: {tg_pos}")
-    logger.debug(f"📊 Всего символов в Python: {len(text)}")
-    logger.debug(f"📊 Разница: {tg_pos - len(text)}")
+    logger.debug(f"{'END':<8} {'':<10} {tg_pos:<10} {'':<6}")
+    logger.debug("-" * 60)
+    logger.debug(f"📊 ИТОГО: Python позиций: {len(text)}, Telegram позиций: {tg_pos}")
+    logger.debug(f"📊 РАЗНИЦА: {tg_pos - len(text)} (из-за эмодзи)")
     
     return py_to_tg, tg_to_py
 
-# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ (ИСПРАВЛЕННАЯ) ==========
+# ========== МЕТОД 3: КОРРЕКЦИЯ ПОЗИЦИЙ С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ==========
 
 def correct_entity_position(tg_start: int, tg_length: int, 
                            tg_to_py: Dict[int, int], 
-                           text_length: int) -> Tuple[int, int]:
+                           text_length: int, entity_index: int) -> Tuple[int, int]:
     """
     Корректирует Telegram позиции в Python позиции
     """
+    logger.debug(f"\n  🔄 КОРРЕКЦИЯ ENTITY {entity_index}:")
+    logger.debug(f"     Telegram: start={tg_start}, length={tg_length}, end={tg_start+tg_length}")
+    
     # Получаем все Telegram позиции и сортируем
     tg_positions = sorted(tg_to_py.keys())
+    logger.debug(f"     Доступные Telegram позиции: {tg_positions}")
     
-    # Находим Python-позицию для начала
+    # Находим Python-позицию для начала - берем БЛИЖАЙШУЮ СЛЕВА
     py_start = None
+    last_py = 0
     for tg_pos in tg_positions:
-        if tg_pos >= tg_start:
+        if tg_pos <= tg_start:
             py_start = tg_to_py[tg_pos]
+            logger.debug(f"     Проверка tg_pos={tg_pos} -> py_pos={py_start} (подходит)")
+        else:
+            logger.debug(f"     Проверка tg_pos={tg_pos} -> больше не подходит")
             break
     
     if py_start is None:
-        logger.warning(f"  ⚠️ Не найдена позиция для tg_start={tg_start}")
-        return 0, 0
+        py_start = 0
+        logger.debug(f"     Не найдено, ставим py_start=0")
     
-    # Находим Python-позицию для конца
+    # Находим Python-позицию для конца - берем БЛИЖАЙШУЮ СПРАВА
     tg_end = tg_start + tg_length
     py_end = None
     
+    logger.debug(f"     Ищем конец: tg_end={tg_end}")
     for tg_pos in tg_positions:
         if tg_pos >= tg_end:
             py_end = tg_to_py[tg_pos]
+            logger.debug(f"     Найдено: tg_pos={tg_pos} -> py_end={py_end}")
             break
     
     if py_end is None:
         py_end = text_length
+        logger.debug(f"     Не найдено, ставим py_end={text_length}")
     
-    # Корректируем, чтобы не выходить за границы
-    if py_end > text_length:
-        py_end = text_length
+    py_length = py_end - py_start
+    logger.debug(f"     РЕЗУЛЬТАТ: Python start={py_start}, length={py_length}, end={py_end}")
     
-    # Проверяем, что получили осмысленный результат
-    if py_end <= py_start:
-        logger.warning(f"  ⚠️ Некорректный диапазон: [{py_start}:{py_end}]")
-        return py_start, 1
-    
-    return py_start, py_end - py_start
+    return py_start, py_length
 
-# ========== МЕТОД 4: РАСШИРЕНИЕ ДО ГРАНИЦ СЛОВА ==========
+# ========== МЕТОД 4: ПРОВЕРКА ФРАГМЕНТА ==========
 
-def expand_to_word(text: str, start: int, end: int) -> Tuple[int, int]:
-    """
-    Расширяет выделение до границ слова, но не захватывает соседние слова
-    """
-    # Сохраняем оригинал для сравнения
-    original_start, original_end = start, end
+def analyze_fragment(text: str, start: int, length: int, entity_type: str, index: int):
+    """Анализирует фрагмент текста для отладки"""
+    end = start + length
+    fragment = text[start:end]
     
-    # Русские буквы для проверки
-    russian_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    logger.debug(f"\n  🔍 АНАЛИЗ ФРАГМЕНТА {index} ({entity_type}):")
+    logger.debug(f"     Позиции: [{start}:{end}]")
+    logger.debug(f"     Текст: '{fragment}'")
+    logger.debug(f"     Длина: {len(fragment)} символов")
     
-    # Расширяем влево (только если это часть того же слова)
-    while start > 0 and (text[start-1].isalnum() or text[start-1] in russian_letters):
-        start -= 1
+    # Показываем первые 50 символов с контекстом
+    context_start = max(0, start - 20)
+    context_end = min(len(text), end + 20)
+    context = text[context_start:context_end]
     
-    # Расширяем вправо (только если это часть того же слова)
-    while end < len(text) and (text[end].isalnum() or text[end] in russian_letters):
-        end += 1
+    # Добавляем маркеры для наглядности
+    marked = (context[:start-context_start] + 
+              '【' + fragment[:min(30, len(fragment))] + '】' + 
+              context[end-context_start:])
     
-    # Если расширение слишком большое, возвращаем оригинал
-    if end - start > original_end - original_start + 20:
-        logger.debug(f"  ⚠️ Слишком большое расширение, возвращаем оригинал")
-        return original_start, original_end
+    logger.debug(f"     Контекст: ...{marked}...")
     
-    if start != original_start or end != original_end:
-        logger.debug(f"  🔄 Расширение: [{original_start}:{original_end}] -> [{start}:{end}]")
-        logger.debug(f"     Было: '{text[original_start:original_end]}'")
-        logger.debug(f"     Стало: '{text[start:end]}'")
+    # Проверяем начало фрагмента
+    if fragment and not fragment[0].isalnum() and fragment[0] not in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя':
+        logger.debug(f"     ⚠️ Фрагмент начинается с символа '{fragment[0]}'")
     
-    return start, end
+    return fragment
 
 # ========== МЕТОД 5: ВАЛИДАЦИЯ ФОРМАТИРОВАНИЯ ==========
 
@@ -264,17 +276,25 @@ def validate_formatting(original_text: str, formatted_text: str, expected_fragme
     Проверяет, что все ожидаемые фрагменты правильно отформатированы
     """
     errors = []
+    logger.debug("\n🔍 ВАЛИДАЦИЯ ФОРМАТИРОВАНИЯ:")
     
     # Удаляем все теги для проверки текста
     clean_text = re.sub(r'<[^>]+>', '', formatted_text)
+    logger.debug(f"   Очищенный текст: {clean_text[:100]}...")
     
     # Проверяем целостность текста
     if clean_text != original_text:
         errors.append(f"Текст изменился! Длина: {len(clean_text)} vs {len(original_text)}")
+        logger.error(f"   ❌ Текст изменился!")
         return False, errors
     
+    logger.debug(f"   ✅ Текст не изменился")
+    
     # Проверяем каждый фрагмент
-    for f in expected_fragments:
+    for i, f in enumerate(expected_fragments):
+        logger.debug(f"\n   Проверка фрагмента {i} ({f['type']}):")
+        logger.debug(f"      Текст: '{f['text'][:50]}...'")
+        
         if f['type'] == 'bold':
             pattern = f"<b>{re.escape(f['text'])}</b>"
         elif f['type'] == 'italic':
@@ -284,8 +304,11 @@ def validate_formatting(original_text: str, formatted_text: str, expected_fragme
         else:
             continue
         
-        if not re.search(pattern, formatted_text):
+        if re.search(pattern, formatted_text):
+            logger.debug(f"      ✅ Найден правильно отформатированным")
+        else:
             errors.append(f"Фрагмент '{f['text'][:30]}...' не отформатирован как {f['type']}")
+            logger.error(f"      ❌ НЕ НАЙДЕН!")
     
     return len(errors) == 0, errors
 
@@ -296,22 +319,28 @@ def manual_format(text: str, expected_fragments: List[Dict]) -> str:
     Ручное форматирование с поиском по тексту
     """
     result = text
+    logger.debug("\n✋ РУЧНОЕ ФОРМАТИРОВАНИЕ:")
     
     # Сортируем по длине (сначала длинные)
     sorted_fragments = sorted(expected_fragments, key=lambda x: -len(x['text']))
     
     for f in sorted_fragments:
+        logger.debug(f"\n   Поиск '{f['text'][:30]}...'")
         pos = result.find(f['text'])
+        
         if pos != -1:
+            logger.debug(f"      Найдено на позиции {pos}")
             if f['type'] == 'bold':
                 result = result[:pos] + f"<b>{f['text']}</b>" + result[pos + len(f['text']):]
-                logger.debug(f"  ✋ Ручное применение bold для '{f['text'][:30]}...'")
+                logger.debug(f"      ✅ Применен bold")
             elif f['type'] == 'italic':
                 result = result[:pos] + f"<i>{f['text']}</i>" + result[pos + len(f['text']):]
-                logger.debug(f"  ✋ Ручное применение italic для '{f['text'][:30]}...'")
+                logger.debug(f"      ✅ Применен italic")
             elif f['type'] == 'text_link':
                 result = result[:pos] + f'<a href="{f["url"]}">{f["text"]}</a>' + result[pos + len(f['text']):]
-                logger.debug(f"  ✋ Ручное применение link для '{f['text'][:30]}...'")
+                logger.debug(f"      ✅ Применена ссылка")
+        else:
+            logger.error(f"      ❌ Не найдено в тексте!")
     
     return result
 
@@ -319,53 +348,71 @@ def manual_format(text: str, expected_fragments: List[Dict]) -> str:
 
 def format_text(telegram_text: str, entities: list) -> str:
     """
-    КОМБИНИРОВАННЫЙ ПОДХОД
+    КОМБИНИРОВАННЫЙ ПОДХОД С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ
     """
-    logger.debug(f"\n{'='*60}")
-    logger.debug("🔍 КОМБИНИРОВАННЫЙ ПОДХОД")
-    logger.debug(f"📝 Текст: {repr(telegram_text[:200])}...")
+    logger.debug(f"\n{'='*80}")
+    logger.debug("🔍 КОМБИНИРОВАННЫЙ ПОДХОД С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ")
+    logger.debug(f"📝 Длина текста: {len(telegram_text)} символов")
+    logger.debug(f"📝 Первые 200 символов: {repr(telegram_text[:200])}...")
     
     # ШАГ 1: Строим карты позиций
+    logger.debug("\n" + "="*60)
+    logger.debug("ШАГ 1: ПОСТРОЕНИЕ КАРТЫ ПОЗИЦИЙ")
     py_to_tg, tg_to_py = build_position_maps(telegram_text)
     
     # ШАГ 2: Получаем скорректированные фрагменты
+    logger.debug("\n" + "="*60)
+    logger.debug("ШАГ 2: ПОЛУЧЕНИЕ ТЕКСТА ИЗ TELEGRAM ПО СКОРРЕКТИРОВАННЫМ ПОЗИЦИЯМ")
+    
     fragments = []
     expected_fragments = []
-    logger.debug("\n📋 ТЕКСТ ИЗ TELEGRAM (после коррекции):")
     
     for i, e in enumerate(entities):
+        logger.debug(f"\n--- ENTITY {i} ---")
+        logger.debug(f"   Тип: {e.type}")
+        logger.debug(f"   Telegram offset: {e.offset}")
+        logger.debug(f"   Telegram длина: {e.length}")
+        if hasattr(e, 'url'):
+            logger.debug(f"   URL: {e.url}")
+        
         # Корректируем позиции
-        py_start, py_length = correct_entity_position(e.offset, e.length, tg_to_py, len(telegram_text))
+        py_start, py_length = correct_entity_position(e.offset, e.length, tg_to_py, len(telegram_text), i)
         
         # Получаем текст
-        fragment = telegram_text[py_start:py_start + py_length]
-        
-        if not fragment:
-            logger.warning(f"  ⚠️ Entity {i} дал пустой фрагмент, пропускаем")
-            continue
-        
-        logger.debug(f"  {i}: {e.type} '{fragment[:50]}...'")
-        
-        # Сохраняем фрагмент
-        fragments.append({
-            'id': i,
-            'type': e.type,
-            'text': fragment,
-            'url': getattr(e, 'url', None)
-        })
-        
-        expected_fragments.append({
-            'type': e.type,
-            'text': fragment,
-            'url': getattr(e, 'url', None)
-        })
+        if py_start is not None and py_length > 0:
+            fragment = telegram_text[py_start:py_start + py_length]
+            
+            # Анализируем фрагмент
+            analyze_fragment(telegram_text, py_start, py_length, e.type, i)
+            
+            fragments.append({
+                'id': i,
+                'type': e.type,
+                'text': fragment,
+                'url': getattr(e, 'url', None),
+                'py_start': py_start,
+                'py_length': py_length
+            })
+            
+            expected_fragments.append({
+                'type': e.type,
+                'text': fragment,
+                'url': getattr(e, 'url', None)
+            })
+        else:
+            logger.error(f"   ❌ Не удалось скорректировать позиции для entity {i}")
     
     # ШАГ 3: Ищем фрагменты в болванке
+    logger.debug("\n" + "="*60)
+    logger.debug("ШАГ 3: ПОИСК ФРАГМЕНТОВ В БОЛВАНКЕ MAX")
+    
     max_blank = telegram_text
     positions = []
-    logger.debug("\n🔍 ПОИСК В БОЛВАНКЕ MAX:")
     
-    for f in fragments:
+    for i, f in enumerate(fragments):
+        logger.debug(f"\n   Поиск фрагмента {i} ({f['type']}):")
+        logger.debug(f"      Ищем: '{f['text'][:50]}...'")
+        
         pos = max_blank.find(f['text'])
         
         if pos != -1:
@@ -376,66 +423,100 @@ def format_text(telegram_text: str, entities: list) -> str:
                 'start': pos,
                 'end': pos + len(f['text'])
             })
-            logger.debug(f"  ✅ Найден '{f['text'][:30]}...' на позиции {pos}")
+            logger.debug(f"      ✅ НАЙДЕН на позиции {pos}")
+            
+            # Показываем контекст
+            context_start = max(0, pos - 20)
+            context_end = min(len(max_blank), pos + len(f['text']) + 20)
+            context = max_blank[context_start:context_end]
+            marked = (context[:pos-context_start] + 
+                     '【' + f['text'][:min(30, len(f['text']))] + '】' + 
+                     context[pos+len(f['text'])-context_start:])
+            logger.debug(f"      Контекст: ...{marked}...")
         else:
-            logger.error(f"  ❌ Не найден: '{f['text'][:30]}...'")
+            logger.error(f"      ❌ НЕ НАЙДЕН в тексте!")
     
     if not positions:
-        logger.error("❌ Ни одного фрагмента не найдено!")
+        logger.error("❌ НИ ОДНОГО ФРАГМЕНТА НЕ НАЙДЕНО!")
         return telegram_text
     
     # ШАГ 4: Применяем форматирование
+    logger.debug("\n" + "="*60)
+    logger.debug("ШАГ 4: ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ")
+    
+    # Сортируем от конца к началу
     positions.sort(key=lambda x: -x['start'])
+    logger.debug(f"   Сортировка от конца к началу: {[p['start'] for p in positions]}")
     
     result = list(max_blank)
     offset = 0
+    applied = []
     
-    logger.debug("\n✏️ ПРИМЕНЕНИЕ ФОРМАТИРОВАНИЯ:")
-    
-    for p in positions:
+    for i, p in enumerate(positions):
         start = p['start'] + offset
         end = p['end'] + offset
         
+        logger.debug(f"\n   Применение {i+1}: {p['type']} к '{p['text'][:30]}...'")
+        logger.debug(f"      Текущие позиции: start={start}, end={end}")
+        logger.debug(f"      Текущий offset: {offset}")
+        
         if p['type'] == 'bold':
+            # Вставляем теги
             result[end:end] = list('</b>')
             result[start:start] = list('<b>')
             offset += 7
-            logger.debug(f"  🔧 Жирный: '{p['text'][:30]}...'")
+            applied.append('bold')
+            logger.debug(f"      ✅ Вставлены теги <b> и </b>, новый offset={offset}")
         elif p['type'] == 'italic':
             result[end:end] = list('</i>')
             result[start:start] = list('<i>')
             offset += 7
-            logger.debug(f"  🔧 Курсив: '{p['text'][:30]}...'")
+            applied.append('italic')
+            logger.debug(f"      ✅ Вставлены теги <i> и </i>, новый offset={offset}")
         elif p['type'] == 'text_link':
             link = f'<a href="{p["url"]}">{p["text"]}</a>'
             result[start:end] = list(link)
             offset += len(link) - (end - start)
-            logger.debug(f"  🔗 Ссылка: '{p['text'][:30]}...'")
+            applied.append('link')
+            logger.debug(f"      ✅ Вставлена ссылка, новый offset={offset}")
+        
+        # Показываем текущий результат
+        current = ''.join(result[max(0, start-50):min(len(result), start+50)])
+        logger.debug(f"      Текущий результат: ...{current}...")
     
     formatted = ''.join(result)
+    logger.debug(f"\n   ИТОГОВЫЙ ТЕКСТ после форматирования: {formatted[:200]}...")
+    logger.debug(f"   Применено форматирований: {len(applied)}")
     
     # ШАГ 5: Валидация
-    logger.debug("\n🔍 ВАЛИДАЦИЯ:")
+    logger.debug("\n" + "="*60)
+    logger.debug("ШАГ 5: ВАЛИДАЦИЯ")
+    
     is_valid, errors = validate_formatting(telegram_text, formatted, expected_fragments)
     
     if is_valid:
-        logger.debug("✅ Валидация успешна!")
+        logger.debug("\n✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ УСПЕШНО!")
         return formatted
     else:
-        logger.warning(f"⚠️ Валидация не пройдена: {errors}")
+        logger.warning(f"\n⚠️ ВАЛИДАЦИЯ НЕ ПРОЙДЕНА: {len(errors)} ошибок")
+        for e in errors[:3]:
+            logger.warning(f"   {e}")
         
         # ШАГ 6: Ручное форматирование
-        logger.debug("\n✋ РУЧНОЕ ФОРМАТИРОВАНИЕ:")
+        logger.debug("\n" + "="*60)
+        logger.debug("ШАГ 6: РУЧНОЕ ФОРМАТИРОВАНИЕ")
+        
         manual_result = manual_format(telegram_text, expected_fragments)
         
         # Проверяем ручной результат
         is_valid, errors = validate_formatting(telegram_text, manual_result, expected_fragments)
         
         if is_valid:
-            logger.debug("✅ Ручное форматирование успешно!")
+            logger.debug("\n✅ РУЧНОЕ ФОРМАТИРОВАНИЕ УСПЕШНО!")
             return manual_result
         else:
-            logger.error("❌ Все методы не сработали!")
+            logger.error("\n❌ ВСЕ МЕТОДЫ НЕ СРАБОТАЛИ!")
+            logger.error(f"   Ошибок: {len(errors)}")
             return telegram_text
 
 class MediaUploader:
@@ -855,7 +936,7 @@ async def cleanup():
         await uploader.session.close()
 
 async def main():
-    logger.info("✨✨✨ ЗАПУСК БОТА ✨✨✨")
+    logger.info("✨✨✨ ЗАПУСК БОТА С МАКСИМАЛЬНЫМ ЛОГИРОВАНИЕМ ✨✨✨")
     await telegram_bot.delete_webhook()
     await dp.start_polling(telegram_bot)
 
