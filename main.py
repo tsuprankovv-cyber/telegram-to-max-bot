@@ -4,13 +4,14 @@ import sys
 import asyncio
 import logging
 import aiohttp
+from aiohttp import ClientTimeout
 import json
 import mimetypes
 import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.text_decorations import html_decoration
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -29,6 +30,9 @@ TELEGRAM_GROUP_ID = os.getenv('TELEGRAM_GROUP_ID', '').strip()
 MAX_TOKEN = os.getenv('MAX_TOKEN', '').strip()
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID', '').strip()
 DEBUG_FORMATTING = os.getenv('DEBUG_FORMATTING', 'false').lower() == 'true'
+MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', '20'))
+DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '600'))
+UPLOAD_TIMEOUT = int(os.getenv('UPLOAD_TIMEOUT', '900'))
 
 if not all([TELEGRAM_TOKEN, TELEGRAM_GROUP_ID, MAX_TOKEN, MAX_CHANNEL_ID]):
     logger.error("❌ Не все переменные окружения установлены!")
@@ -42,6 +46,9 @@ logger.info("🚀 ЗАПУСК БОТА-ПЕРЕВОДЧИКА (TELEGRAM -> MAX)
 logger.info(f"👥 TG Group: {TELEGRAM_GROUP_ID}")
 logger.info(f"📢 MAX Channel: {MAX_CHANNEL_ID}")
 logger.info(f"🔍 DEBUG_FORMATTING: {DEBUG_FORMATTING}")
+logger.info(f"📦 MAX_FILE_SIZE_MB: {MAX_FILE_SIZE_MB} МБ")
+logger.info(f"⏱️ DOWNLOAD_TIMEOUT: {DOWNLOAD_TIMEOUT} сек")
+logger.info(f"⏱️ UPLOAD_TIMEOUT: {UPLOAD_TIMEOUT} сек")
 logger.info("="*80)
 
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
@@ -74,33 +81,42 @@ def safe_filename(filename: str) -> str:
     name = re.sub(r'_+', '_', name).strip('_')
     return f"{name or 'file'}.{ext}" if ext else (name or 'file')
 
-# === ИЗВЛЕЧЕНИЕ КНОПОК ===
+# === ИЗВЛЕЧЕНИЕ КНОПОК С ЗАМЕНОЙ URL ===
 def extract_buttons(message: types.Message) -> list:
+    """
+    Извлекает кнопки из сообщения.
+    🔥 ЗАМЕНЯЕТ старую ссылку Яндекс Формы на новую (ТОЛЬКО если точное совпадение)
+    """
     buttons = []
     if message.reply_markup and hasattr(message.reply_markup, 'inline_keyboard'):
         for row in message.reply_markup.inline_keyboard:
             button_row = []
             for btn in row:
                 if hasattr(btn, 'url') and btn.url:
+                    # 🔥 ЗАМЕНА URL (ТОЛЬКО ТОЧНОЕ СОВПАДЕНИЕ)
+                    url = btn.url
+                    OLD_URL = "https://forms.yandex.ru/cloud/680f5f5ce010db158f8b7610"
+                    NEW_URL = "https://forms.yandex.ru/cloud/680f8114505690020a036f30"
+                    
+                    # Заменяем ТОЛЬКО если URL точно совпадает
+                    if url == OLD_URL:
+                        url = NEW_URL
+                        logger.info(f"🔗 ЗАМЕНЕНА ССЫЛКА: старая форма → новая форма")
+                    
                     button_row.append({
                         "type": "link",
                         "text": btn.text,
-                        "url": btn.url
+                        "url": url
                     })
             if button_row:
                 buttons.append(button_row)
     return buttons
 
 # ============================================================
-# 🔥 ФОРМАТИРОВАНИЕ ЧЕРЕЗ aiogram (поддерживает вложенность!)
+# 🔥 ФОРМАТИРОВАНИЕ ЧЕРЕЗ aiogram
 # ============================================================
 
 def format_text(telegram_text: str, entities: list, message_id: int = None) -> str:
-    """
-    Преобразует текст с entity из Telegram в HTML.
-    ✅ Поддерживает перекрывающиеся сущности: <b><i>жирный курсив</i></b>
-    ✅ Использует встроенный html_decoration из aiogram
-    """
     msg_prefix = f"[MSG {message_id}]" if message_id else ""
     
     if not telegram_text:
@@ -115,29 +131,15 @@ def format_text(telegram_text: str, entities: list, message_id: int = None) -> s
     
     if DEBUG_FORMATTING:
         logger.debug(f"{msg_prefix} 📄 ОРИГИНАЛ: {repr(telegram_text)}")
-        for i, e in enumerate(entities):
-            off = e.offset if hasattr(e, 'offset') else e['offset']
-            ln = e.length if hasattr(e, 'length') else e['length']
-            tp = e.type if hasattr(e, 'type') else e['type']
-            logger.debug(f"{msg_prefix}   Entity #{i+1}: {tp} [{off}+{ln}]")
 
     try:
-        # ✅ Встроенный метод aiogram корректно обрабатывает:
-        # - Перекрывающиеся сущности (bold+italic на одном диапазоне)
-        # - Вложенные сущности (bold внутри italic)
-        # - Сущности с URL (text_link)
-        # - Конвертацию UTF-16 offset → Unicode code points
         result = html_decoration.unparse(telegram_text, entities)
-        
         logger.info(f"{msg_prefix} ✅ Форматирование через aiogram успешно")
         if DEBUG_FORMATTING:
             logger.debug(f"{msg_prefix} 📄 РЕЗУЛЬТАТ: {repr(result)}")
-            logger.debug(f"{msg_prefix} 📄 РЕЗУЛЬТАТ (вид): {result}")
         return result
-        
     except Exception as e:
         logger.exception(f"{msg_prefix} ❌ Ошибка форматирования: {e}")
-        logger.warning(f"{msg_prefix} ⚠️ Возвращаем чистый текст")
         return telegram_text
 
 # === КЛАССЫ ДЛЯ РАБОТЫ С МЕДИА И API ===
@@ -147,6 +149,7 @@ class MediaUploader:
         self.token = token
         self.base_url = "https://platform-api.max.ru"
         self.session = None
+        self.timeout = ClientTimeout(total=UPLOAD_TIMEOUT, connect=30, sock_read=UPLOAD_TIMEOUT)
         self.stats = {
             "documents_ok": 0, "documents_failed": 0,
             "video_ok": 0, "video_failed": 0,
@@ -157,8 +160,8 @@ class MediaUploader:
 
     async def ensure_session(self):
         if not self.session:
-            self.session = aiohttp.ClientSession()
-            logger.info("🔗 Создана новая aiohttp сессия для MediaUploader")
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
+            logger.info(f"🔗 Создана сессия MediaUploader с таймаутом {UPLOAD_TIMEOUT} сек")
 
     async def create_upload(self, media_type: str) -> dict:
         await self.ensure_session()
@@ -166,10 +169,8 @@ class MediaUploader:
         headers = {"Authorization": self.token}
         params = {"type": media_type}
         
-        logger.debug(f"📤 POST {url} params={params}")
         async with self.session.post(url, headers=headers, params=params) as resp:
             resp_text = await resp.text()
-            logger.debug(f"📥 Ответ: {resp.status} {resp_text[:200]}")
             if resp.status == 200:
                 return await resp.json()
             else:
@@ -178,15 +179,28 @@ class MediaUploader:
     async def upload_file_only(self, upload_url: str, file_data: bytes, filename: str) -> bool:
         await self.ensure_session()
         content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        file_size = len(file_data)
         
-        logger.debug(f"📤 Загрузка файла: {filename} ({len(file_data)} байт, type={content_type})")
+        logger.info(f"📤 Загрузка на MAX: {filename} ({file_size / 1024 / 1024:.2f} МБ, {content_type})")
+        
         data = aiohttp.FormData()
         data.add_field('file', file_data, filename=filename, content_type=content_type)
         
-        async with self.session.post(upload_url, data=data) as resp:
-            resp_text = await resp.text()
-            logger.debug(f"📥 Ответ загрузки: {resp.status}")
-            return resp.status == 200
+        try:
+            async with self.session.post(upload_url, data=data) as resp:
+                resp_text = await resp.text()
+                if resp.status == 200:
+                    logger.info(f"✅ Файл загружен: {filename}")
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка загрузки: {resp.status} — {resp_text[:300]}")
+                    return False
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ Таймаут при загрузке {filename} ({file_size / 1024 / 1024:.2f} МБ)")
+            return False
+        except Exception as e:
+            logger.exception(f"❌ Исключение при загрузке {filename}: {e}")
+            return False
 
     async def upload_file_and_get_token(self, upload_url: str, file_data: bytes, filename: str) -> Optional[str]:
         await self.ensure_session()
@@ -195,35 +209,45 @@ class MediaUploader:
         data = aiohttp.FormData()
         data.add_field('file', file_data, filename=filename, content_type=content_type)
         
-        async with self.session.post(upload_url, data=data) as resp:
-            if resp.status == 200:
-                try:
+        try:
+            async with self.session.post(upload_url, data=data) as resp:
+                if resp.status == 200:
                     result = await resp.json()
                     token = result.get('token')
-                    logger.debug(f"✅ Получен токен: {token[:20] if token else None}...")
+                    logger.info(f"✅ Получен токен: {token[:20] if token else None}...")
                     return token
-                except json.JSONDecodeError as e:
-                    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+                else:
+                    logger.error(f"❌ Ошибка загрузки файла: {resp.status}")
                     return None
-            else:
-                logger.error(f"❌ Ошибка загрузки файла: {resp.status}")
-                return None
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ Таймаут при загрузке файла")
+            return None
+        except Exception as e:
+            logger.exception(f"❌ Исключение: {e}")
+            return None
 
     async def upload_video(self, file_data: bytes, filename: str) -> Optional[str]:
         try:
             safe_name = safe_filename(filename)
-            logger.info(f"🎬 Загрузка видео: {safe_name} ({len(file_data)} байт)")
+            file_size = len(file_data)
+            file_size_mb = file_size / 1024 / 1024
+            
+            logger.info(f"🎬 Загрузка видео: {safe_name} ({file_size_mb:.2f} МБ)")
+            
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                logger.warning(f"⚠️ Видео превышает лимит {MAX_FILE_SIZE_MB} МБ ({file_size_mb:.2f} МБ)")
+            
             upload_info = await self.create_upload("video")
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
             
             if not token or not upload_url:
-                logger.error(f"❌ Не получен token или url из upload_info: {upload_info}")
+                logger.error(f"❌ Не получен token или url из upload_info")
                 self.stats["video_failed"] += 1
                 return None
                 
             if await self.upload_file_only(upload_url, file_data, safe_name):
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 self.stats["video_ok"] += 1
                 logger.info(f"✅ Видео загружено: {safe_name}")
                 return token
@@ -231,6 +255,10 @@ class MediaUploader:
                 self.stats["video_failed"] += 1
                 logger.error(f"❌ Ошибка загрузки видео: {safe_name}")
                 return None
+        except asyncio.TimeoutError:
+            logger.exception(f"⏱️ Таймаут при загрузке видео")
+            self.stats["video_failed"] += 1
+            return None
         except Exception as e:
             logger.exception(f"❌ Исключение при загрузке видео: {e}")
             self.stats["video_failed"] += 1
@@ -239,7 +267,9 @@ class MediaUploader:
     async def upload_document(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
         try:
             safe_name = safe_filename(filename)
-            logger.info(f"📄 Загрузка документа: {safe_name} ({len(file_data)} байт)")
+            file_size = len(file_data)
+            logger.info(f"📄 Загрузка документа: {safe_name} ({file_size / 1024 / 1024:.2f} МБ)")
+            
             upload_info = await self.create_upload("file")
             upload_url = upload_info.get('url')
             
@@ -255,6 +285,10 @@ class MediaUploader:
             else:
                 self.stats["documents_failed"] += 1
                 return None
+        except asyncio.TimeoutError:
+            logger.exception(f"⏱️ Таймаут при загрузке документа")
+            self.stats["documents_failed"] += 1
+            return None
         except Exception as e:
             logger.exception(f"❌ Исключение при загрузке документа: {e}")
             self.stats["documents_failed"] += 1
@@ -263,7 +297,9 @@ class MediaUploader:
     async def upload_audio(self, file_data: bytes, filename: str) -> Optional[Tuple[str, str]]:
         try:
             safe_name = safe_filename(filename)
-            logger.info(f"🎵 Загрузка аудио: {safe_name} ({len(file_data)} байт)")
+            file_size = len(file_data)
+            logger.info(f"🎵 Загрузка аудио: {safe_name} ({file_size / 1024 / 1024:.2f} МБ)")
+            
             upload_info = await self.create_upload("file")
             upload_url = upload_info.get('url')
             
@@ -279,6 +315,10 @@ class MediaUploader:
             else:
                 self.stats["audio_failed"] += 1
                 return None
+        except asyncio.TimeoutError:
+            logger.exception(f"⏱️ Таймаут при загрузке аудио")
+            self.stats["audio_failed"] += 1
+            return None
         except Exception as e:
             logger.exception(f"❌ Исключение при загрузке аудио: {e}")
             self.stats["audio_failed"] += 1
@@ -287,7 +327,9 @@ class MediaUploader:
     async def upload_voice(self, file_data: bytes, filename: str) -> Optional[str]:
         try:
             safe_name = safe_filename(filename)
-            logger.info(f"🎤 Загрузка голосового: {safe_name} ({len(file_data)} байт)")
+            file_size = len(file_data)
+            logger.info(f"🎤 Загрузка голосового: {safe_name} ({file_size / 1024 / 1024:.2f} МБ)")
+            
             upload_info = await self.create_upload("audio")
             token = upload_info.get('token')
             upload_url = upload_info.get('url')
@@ -304,6 +346,10 @@ class MediaUploader:
             else:
                 self.stats["voice_failed"] += 1
                 return None
+        except asyncio.TimeoutError:
+            logger.exception(f"⏱️ Таймаут при загрузке голосового")
+            self.stats["voice_failed"] += 1
+            return None
         except Exception as e:
             logger.exception(f"❌ Исключение при загрузке голосового: {e}")
             self.stats["voice_failed"] += 1
@@ -315,20 +361,19 @@ class TelegramDownloader:
         self.api_url = f"https://api.telegram.org/bot{token}"
         self.file_url = f"https://api.telegram.org/file/bot{token}"
         self.session = None
+        self.timeout = ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=30, sock_read=DOWNLOAD_TIMEOUT)
 
     async def ensure_session(self):
         if not self.session:
-            self.session = aiohttp.ClientSession()
-            logger.info("🔗 Создана новая aiohttp сессия для TelegramDownloader")
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
+            logger.info(f"🔗 Создана сессия TelegramDownloader с таймаутом {DOWNLOAD_TIMEOUT} сек")
 
     async def get_file_info(self, file_id: str) -> dict:
         await self.ensure_session()
         url = f"{self.api_url}/getFile"
-        logger.debug(f"📤 POST {url} file_id={file_id[:20]}...")
         async with self.session.post(url, json={"file_id": file_id}) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                logger.debug(f"📥 FileInfo: {data.get('result', {}).get('file_path', 'N/A')}")
                 return data['result']
             else:
                 text = await resp.text()
@@ -339,9 +384,15 @@ class TelegramDownloader:
         file_info = await self.get_file_info(file_id)
         file_path = file_info['file_path']
         filename = file_path.split('/')[-1]
+        file_size = file_info.get('file_size', 0)
         url = f"{self.file_url}/{file_path}"
         
-        logger.info(f"📥 Скачивание файла: {filename} ({file_info.get('file_size', '?')} байт)")
+        file_size_mb = file_size / 1024 / 1024
+        logger.info(f"📥 Скачивание: {filename} ({file_size_mb:.2f} МБ)")
+        
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            logger.warning(f"⚠️ Файл превышает лимит {MAX_FILE_SIZE_MB} МБ ({file_size_mb:.2f} МБ)")
+        
         async with self.session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.read()
@@ -350,28 +401,18 @@ class TelegramDownloader:
             else:
                 raise Exception(f"Ошибка download: {resp.status}")
 
-# Инициализация глобальных объектов
+# Инициализация
 uploader = MediaUploader(MAX_TOKEN)
 downloader = TelegramDownloader(TELEGRAM_TOKEN)
 
 async def send_to_max(text: str, attachments: List[dict] = None):
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
-    headers = {
-        "Authorization": MAX_TOKEN,
-        "Content-Type": "application/json"
-    }
-
-    data = {
-        "text": text or " ",
-        "format": "html"
-    }
-
+    headers = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
+    data = {"text": text or " ", "format": "html"}
     if attachments:
         data["attachments"] = attachments
 
     logger.info(f"📤 Отправка в MAX: текст={len(text)} симв., вложений={len(attachments) if attachments else 0}")
-    if DEBUG_FORMATTING:
-        logger.debug(f"📦 Payload: {json.dumps(data, ensure_ascii=False)[:500]}...")
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -396,20 +437,23 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             logger.info("🖼️ Обработка фото")
             file_info = await downloader.get_file_info(message.photo[-1].file_id)
             photo_url = f"{downloader.file_url}/{file_info['file_path']}"
-            attachments.append({
-                "type": "image",
-                "payload": {"url": photo_url}
-            })
+            attachments.append({"type": "image", "payload": {"url": photo_url}})
             uploader.stats["photo_ok"] += 1
-            logger.info(f"✅ Фото добавлено: {photo_url}")
 
         elif message.video:
-            logger.info("🎥 Обработка видео")
+            video_size = message.video.file_size
+            video_size_mb = video_size / 1024 / 1024
+            
+            logger.info(f"🎥 Обработка видео ({video_size_mb:.2f} МБ)")
+            
+            if video_size_mb > 20:
+                logger.warning(f"⚠️ Видео слишком большое ({video_size_mb:.2f} МБ > 20 МБ) — пропускаем")
+                return text, attachments
+            
             file_data, filename = await downloader.download_file(message.video.file_id)
             token = await uploader.upload_video(file_data, filename)
             if token:
                 attachments.append({"type": "video", "payload": {"token": token}})
-                logger.info(f"✅ Видео добавлено с токеном: {token[:20] if token else None}...")
 
         elif message.audio:
             logger.info("🎵 Обработка аудио")
@@ -419,7 +463,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             if result:
                 token, safe_name = result
                 attachments.append({"type": "file", "payload": {"token": token, "name": safe_name}})
-                logger.info(f"✅ Аудио добавлено: {safe_name}")
 
         elif message.voice:
             logger.info("🎤 Обработка голосового")
@@ -427,7 +470,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             token = await uploader.upload_voice(file_data, "voice.ogg")
             if token:
                 attachments.append({"type": "audio", "payload": {"token": token}})
-                logger.info(f"✅ Голосовое добавлено с токеном: {token[:20] if token else None}...")
 
         elif message.document:
             file_name = message.document.file_name
@@ -435,7 +477,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
             file_data, _ = await downloader.download_file(message.document.file_id)
             ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
             
-            # Логика определения типа файла для MAX
             if ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt']:
                 result = await uploader.upload_document(file_data, file_name)
                 if result:
@@ -451,7 +492,6 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
                     token, safe_name = result
                     attachments.append({"type": "file", "payload": {"token": token, "name": safe_name}})
             else:
-                # По умолчанию как документ
                 result = await uploader.upload_document(file_data, file_name)
                 if result:
                     token, safe_name = result
@@ -464,101 +504,69 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
 
 @dp.message()
 async def forward(message: types.Message):
-    # Фильтр по группе
     if str(message.chat.id) != str(TELEGRAM_GROUP_ID):
-        logger.debug(f"🚫 Сообщение из другого чата {message.chat.id}, игнорируем")
         return
 
-    logger.info(f"📨 Получено сообщение ID: {message.message_id} из чата {message.chat.id}")
+    logger.info(f"📨 Получено сообщение ID: {message.message_id}")
     
     buttons = extract_buttons(message)
     attachments = []
     final_text = ""
     
-    # 1. Обработка текста и форматирования
     if message.text:
-        raw_text = message.text
-        entities = message.entities or []
-        logger.info("📝 Чисто текстовое сообщение")
+        raw_text, entities = message.text, message.entities or []
     elif message.caption:
-        raw_text = message.caption
-        entities = message.caption_entities or []
-        logger.info("📝 Сообщение с подписью (медиа)")
+        raw_text, entities = message.caption, message.caption_entities or []
     else:
-        raw_text = ""
-        entities = []
-        logger.info("📝 Сообщение без текста")
+        raw_text, entities = "", []
 
     if raw_text:
         final_text = format_text(raw_text, entities, message_id=message.message_id)
-        logger.info(f"✍️ Итоговый текст: {len(final_text)} символов")
-        if DEBUG_FORMATTING:
-            logger.debug(f"📄 Итоговый текст (repr): {repr(final_text[:200])}...")
     
-    # Добавление префикса пересылки если нужно
     if message.forward_date and message.forward_from_chat:
         source = message.forward_from_chat.title or "Неизвестный источник"
         final_text = f"📢 Переслано из {source}:\n\n{final_text}"
-        logger.info(f"🔁 Добавлен префикс пересылки из: {source}")
 
-    # 2. Обработка медиа
     if message.photo or message.video or message.audio or message.voice or message.document:
-        logger.info("📦 Обработка медиа-вложений")
+        logger.info("📦 Обработка медиа")
         _, media_attachments = await process_media_message(message)
         attachments.extend(media_attachments)
-        logger.info(f"📎 Добавлено вложений: {len(media_attachments)}")
-        
-        if not attachments and (message.photo or message.video or message.audio or message.voice or message.document):
-            logger.warning("⚠️ Медиа найдено, но не удалось загрузить ни одного вложения")
-            if not final_text:
-                logger.warning("⚠️ Нет текста для отправки, пропускаем сообщение")
-                return 
+        if not attachments and not final_text:
+            return 
 
-    # 3. Обработка кнопок
     if buttons:
-        attachments.append({
-            "type": "inline_keyboard",
-            "payload": {"buttons": buttons}
-        })
-        logger.info(f"🔘 Добавлено кнопок: {len(buttons)} рядов")
+        attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
 
-    # 4. Отправка
     if final_text or attachments:
         success = await send_to_max(final_text, attachments if attachments else None)
         if success:
-            logger.info(f"✅ Сообщение {message.message_id} успешно переслано")
-        else:
-            logger.error(f"❌ Не удалось переслать сообщение {message.message_id}")
+            logger.info(f"✅ Сообщение {message.message_id} переслано")
     else:
-        logger.warning("⚠️ Нечего отправлять (нет текста и медиа)")
+        logger.warning("⚠️ Нечего отправлять")
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    await message.answer("✅ Бот запущен и готов к пересылке сообщений.\nИспользуйте /stats для проверки статистики.")
-    logger.info(f"👤 Пользователь {message.from_user.id} выполнил /start")
+    await message.answer("✅ Бот запущен. Используйте /stats для статистики.")
 
 @dp.message(Command("stats"))
 async def show_stats(message: types.Message):
-    stats = uploader.stats
+    s = uploader.stats
     text = (
-        f"📊 **СТАТИСТИКА ЗАГРУЗОК:**\n\n"
-        f"📄 Документы: ✅ {stats['documents_ok']} | ❌ {stats['documents_failed']}\n"
-        f"🎥 Видео: ✅ {stats['video_ok']} | ❌ {stats['video_failed']}\n"
-        f"🎵 Аудио: ✅ {stats['audio_ok']} | ❌ {stats['audio_failed']}\n"
-        f"🎤 Голосовые: ✅ {stats['voice_ok']} | ❌ {stats['voice_failed']}\n"
-        f"🖼️ Фото: ✅ {stats['photo_ok']} | ❌ {stats['photo_failed']}"
+        f"📊 **СТАТИСТИКА:**\n"
+        f"📄 Документы: ✅ {s['documents_ok']} | ❌ {s['documents_failed']}\n"
+        f"🎥 Видео: ✅ {s['video_ok']} | ❌ {s['video_failed']}\n"
+        f"🎵 Аудио: ✅ {s['audio_ok']} | ❌ {s['audio_failed']}\n"
+        f"🎤 Голосовые: ✅ {s['voice_ok']} | ❌ {s['voice_failed']}\n"
+        f"🖼️ Фото: ✅ {s['photo_ok']} | ❌ {s['photo_failed']}"
     )
     await message.answer(text, parse_mode="Markdown")
-    logger.info(f"👤 Пользователь {message.from_user.id} запросил статистику")
 
 async def cleanup():
     logger.info("🧹 Закрытие сессий...")
     if downloader.session:
         await downloader.session.close()
-        logger.info("✅ Сессия TelegramDownloader закрыта")
     if uploader.session:
         await uploader.session.close()
-        logger.info("✅ Сессия MediaUploader закрыта")
 
 async def main():
     await telegram_bot.delete_webhook(drop_pending_updates=True)
@@ -566,7 +574,7 @@ async def main():
     try:
         await dp.start_polling(telegram_bot)
     except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Получен сигнал остановки")
+        logger.info("🛑 Остановка")
     finally:
         await cleanup()
 
