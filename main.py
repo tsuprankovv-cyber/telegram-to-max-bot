@@ -426,22 +426,11 @@ async def main():
     
     logger.info("✨ Запуск polling...")
     
-    # 🔹 ЗАПУСК POLLING С ЗАЩИТОЙ
-    polling_task = None
+    # 🔹 ЗАПУСК POLLING (БЕЗ __all__!)
     try:
-        # 🔹 КЛЮЧЕВОЕ: skip_updates=True сбрасывает старые обновления
-        polling_task = asyncio.create_task(
-            dp.start_polling(
-                telegram_bot,
-                allowed_updates=types.Update.__all__,
-                skip_updates=True
-            )
-        )
+        # 🔹 skip_updates=True сбрасывает старые обновления
+        await dp.start_polling(telegram_bot, skip_updates=True)
         logger.info("✅ Polling запущен успешно")
-        
-        # Ждём завершения polling (никогда не произойдёт при нормальной работе)
-        await polling_task
-        
     except asyncio.CancelledError:
         logger.info("🛑 Polling остановлен")
     except Exception as e:
