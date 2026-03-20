@@ -331,7 +331,7 @@ async def process_media_message(message: types.Message) -> Tuple[str, List[dict]
         logger.error(f"❌ process_media_message: {e}")
     return message.caption or "", attachments
 
-# === ОБРАБОТЧИК СООБЩЕНИЙ ===
+# === ОБРАБОТЧИК СООБЩЕНИЙ (БЕЗ ПРЕФИКСА) ===
 @dp.message()
 async def forward(message: types.Message):
     if str(message.chat.id) != str(TELEGRAM_GROUP_ID):
@@ -349,9 +349,10 @@ async def forward(message: types.Message):
     if raw_text:
         final_text = format_text(raw_text, entities, message_id=message.message_id)
     
-    if message.forward_date and message.forward_from_chat:
-        source = message.forward_from_chat.title or "Неизвестный источник"
-        final_text = f"📢 Переслано из {source}:\n\n{final_text}"
+    # ❌ УДАЛЕНО: Префикс "📢 Переслано из..."
+    # if message.forward_date and message.forward_from_chat:
+    #     source = message.forward_from_chat.title or "Неизвестный источник"
+    #     final_text = f"📢 Переслано из {source}:\n\n{final_text}"
     
     if message.photo or message.video or message.audio or message.voice or message.document:
         _, media_attachments = await process_media_message(message)
