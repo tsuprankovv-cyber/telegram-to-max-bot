@@ -10,6 +10,7 @@ import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.text_decorations import html_decoration
+from aiogram.client.session.aiohttp import AiohttpSession
 from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -50,7 +51,7 @@ if missing:
     raise ValueError(f"Missing: {', '.join(missing)}")
 
 if not PROXY_URL:
-    logger.warning("⚠️ PROXY_URL не настроен! Бот может не работать из РФ")
+    logger.warning("⚠️ PROXY_URL не настроен!")
 
 logger.info("✅ Все переменные установлены")
 logger.info("="*80)
@@ -62,7 +63,6 @@ dp = Dispatcher()
 telegram_bot = None
 uploader = None
 downloader = None
-proxy_connector = None
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -129,8 +129,7 @@ class MediaUploader:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=120)
             if self.proxy:
-                connector = aiohttp.TCPConnector()
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
+                self.session = aiohttp.ClientSession(timeout=timeout, proxy=self.proxy)
             else:
                 self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -236,8 +235,7 @@ class TelegramDownloader:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=60)
             if self.proxy:
-                connector = aiohttp.TCPConnector()
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
+                self.session = aiohttp.ClientSession(timeout=timeout, proxy=self.proxy)
             else:
                 self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -270,8 +268,7 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     try:
         timeout = aiohttp.ClientTimeout(total=60)
         if PROXY_URL:
-            connector = aiohttp.TCPConnector()
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=PROXY_URL) as session:
+            async with aiohttp.ClientSession(timeout=timeout, proxy=PROXY_URL) as session:
                 async with session.post(url, headers=headers, json=data) as resp:
                     if resp.status == 200:
                         logger.info("✅ Отправлено в MAX")
@@ -405,26 +402,37 @@ async def cleanup():
 async def main():
     global telegram_bot, uploader, downloader
     
-    # 🔹 Создаём бота БЕЗ прокси в AiohttpSession (чтобы не требовался aiohttp-socks)
-    # Прокси используем только для downloader и send_to_max
-    telegram_bot = Bot(token=TELEGRAM_TOKEN)
+    # 🔹 Создаём сессию для бота ЧЕРЕЗ ПРОКСИ (без AiohttpSession)
+    timeout = aiohttp.ClientTimeout(total=120)
+    
+    if PROXY_URL:
+        logger.info(f"🔹 Создаём сессию с прокси: {PROXY_URL}")
+        # Создаём aiohttp сессию с прокси
+        aiohttp_session = aiohttp.ClientSession(timeout=timeout, proxy=PROXY_URL)
+        # Передаём в aiogram через AiohttpSession wrapper
+        session = AiohttpSession(aiohttp_session)
+    else:
+        logger.warning("⚠️ Прокси не настроен!")
+        session = AiohttpSession(timeout=timeout)
+    
+    telegram_bot = Bot(token=TELEGRAM_TOKEN, session=session)
     uploader = MediaUploader(MAX_TOKEN, PROXY_URL)
     downloader = TelegramDownloader(TELEGRAM_TOKEN, PROXY_URL)
     
-    # Webhook — опционально (без прокси, может не сработать из РФ)
+    # Webhook — опционально
     try:
         await asyncio.wait_for(telegram_bot.delete_webhook(drop_pending_updates=True), timeout=30)
         logger.info("✅ Webhook удалён")
     except Exception as e:
         logger.warning(f"⚠️ Webhook: {e}")
     
-    # Проверка соединения (через downloader с прокси)
+    # Проверка соединения
     try:
         me = await telegram_bot.get_me()
         logger.info(f"✅ Бот авторизован: @{me.username}")
     except Exception as e:
         logger.error(f"❌ Telegram: {e}")
-        logger.error("💡 Если ошибка timeout — прокси может не работать")
+        logger.error("💡 Прокси не работает или неверные данные")
         raise
     
     logger.info("✨ Polling запущен...")
