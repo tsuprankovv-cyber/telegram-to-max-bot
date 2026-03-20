@@ -58,6 +58,7 @@ dp = Dispatcher()
 telegram_bot = None
 uploader = None
 downloader = None
+bot_username = None  # 🔹 Сохраняем username после get_me()
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -375,7 +376,7 @@ async def show_stats(message: types.Message):
 async def health_handler(request):
     return web.json_response({
         "status": "ok",
-        "bot": telegram_bot.username if telegram_bot else "not started"
+        "bot": bot_username if bot_username else "not started"
     })
 
 # === WEBHOOK HANDLER ===
@@ -395,23 +396,26 @@ async def cleanup():
 
 # === ЗАПУСК ===
 async def on_startup(app: web.Application):
-    global telegram_bot, uploader, downloader
+    global telegram_bot, uploader, downloader, bot_username
     
     telegram_bot = Bot(token=TELEGRAM_TOKEN)
     uploader = MediaUploader(MAX_TOKEN)
     downloader = TelegramDownloader(TELEGRAM_TOKEN)
     
-    # 🔹 Устанавливаем webhook (БЕЗ __all__!)
+    # 🔹 Получаем информацию о боте
+    me = await telegram_bot.get_me()
+    bot_username = me.username  # ✅ Сохраняем username
+    logger.info(f"✅ Бот авторизован: @{bot_username}")
+    
+    # 🔹 Устанавливаем webhook
     webhook_url = f"{BASE_URL}/webhook"
     try:
-        # ✅ Просто None - все обновления будут приходить
         await telegram_bot.set_webhook(webhook_url, allowed_updates=None)
         logger.info(f"✅ Webhook установлен: {webhook_url}")
     except Exception as e:
         logger.error(f"❌ Ошибка установки webhook: {e}")
         raise
     
-    logger.info(f"✅ Бот авторизован: @{telegram_bot.username}")
     logger.info("✨ Webhook режим запущен...")
 
 async def on_shutdown(app: web.Application):
