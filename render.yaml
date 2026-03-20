@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: telegram-forwarder-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_GROUP_ID
+        sync: false
+      - key: MAX_TOKEN
+        sync: false
+      - key: MAX_CHANNEL_ID
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: 1
