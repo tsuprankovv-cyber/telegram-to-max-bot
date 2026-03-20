@@ -58,7 +58,7 @@ dp = Dispatcher()
 telegram_bot = None
 uploader = None
 downloader = None
-bot_username = None  # 🔹 Сохраняем username после get_me()
+bot_username = None
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -87,15 +87,30 @@ def safe_filename(filename: str) -> str:
     name = re.sub(r'_+', '_', name).strip('_')
     return f"{name or 'file'}.{ext}" if ext else (name or 'file')
 
-# === ИЗВЛЕЧЕНИЕ КНОПОК ===
+# === ИЗВЛЕЧЕНИЕ КНОПОК (С ЗАМЕНОЙ ССЫЛКИ) ===
 def extract_buttons(message: types.Message) -> list:
     buttons = []
+    
+    # 🔹 СТАРАЯ И НОВАЯ ССЫЛКИ
+    OLD_LINK = "https://forms.yandex.ru/cloud/680f5f5ce010db158f8b7610"
+    NEW_LINK = "https://forms.yandex.ru/cloud/680f8114505690020a036f30"
+    
     if message.reply_markup and hasattr(message.reply_markup, 'inline_keyboard'):
         for row in message.reply_markup.inline_keyboard:
             button_row = []
             for btn in row:
                 if hasattr(btn, 'url') and btn.url:
-                    button_row.append({"type": "link", "text": btn.text, "url": btn.url})
+                    # 🔹 ЗАМЕНА ССЫЛКИ ЕСЛИ СОВПАДАЕТ
+                    url = btn.url
+                    if OLD_LINK in url:
+                        url = url.replace(OLD_LINK, NEW_LINK)
+                        logger.info(f"🔄 Замена ссылки: {OLD_LINK[:50]}... → {NEW_LINK[:50]}...")
+                    
+                    button_row.append({
+                        "type": "link",
+                        "text": btn.text,
+                        "url": url
+                    })
             if button_row:
                 buttons.append(button_row)
     return buttons
@@ -346,6 +361,7 @@ async def forward(message: types.Message):
     
     if buttons:
         attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
+        logger.info(f"🔘 Кнопки: {len(buttons)} рядов")
     
     if final_text or attachments:
         success = await send_to_max(final_text, attachments if attachments else None)
@@ -404,7 +420,7 @@ async def on_startup(app: web.Application):
     
     # 🔹 Получаем информацию о боте
     me = await telegram_bot.get_me()
-    bot_username = me.username  # ✅ Сохраняем username
+    bot_username = me.username
     logger.info(f"✅ Бот авторизован: @{bot_username}")
     
     # 🔹 Устанавливаем webhook
