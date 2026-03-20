@@ -10,7 +10,6 @@ import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.text_decorations import html_decoration
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from typing import List, Tuple, Optional
 
@@ -372,7 +371,7 @@ async def show_stats(message: types.Message):
         parse_mode="Markdown"
     )
 
-# === HEALTH CHECK (для UptimeRobot) ===
+# === HEALTH CHECK ===
 async def health_handler(request):
     return web.json_response({
         "status": "ok",
@@ -402,10 +401,11 @@ async def on_startup(app: web.Application):
     uploader = MediaUploader(MAX_TOKEN)
     downloader = TelegramDownloader(TELEGRAM_TOKEN)
     
-    # 🔹 Устанавливаем webhook
+    # 🔹 Устанавливаем webhook (БЕЗ __all__!)
     webhook_url = f"{BASE_URL}/webhook"
     try:
-        await telegram_bot.set_webhook(webhook_url, allowed_updates=types.Update.__all__)
+        # ✅ Просто None - все обновления будут приходить
+        await telegram_bot.set_webhook(webhook_url, allowed_updates=None)
         logger.info(f"✅ Webhook установлен: {webhook_url}")
     except Exception as e:
         logger.error(f"❌ Ошибка установки webhook: {e}")
