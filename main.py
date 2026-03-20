@@ -30,12 +30,33 @@ TELEGRAM_GROUP_ID = os.getenv('TELEGRAM_GROUP_ID', '').strip()
 MAX_TOKEN = os.getenv('MAX_TOKEN', '').strip()
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID', '').strip()
 DEBUG_FORMATTING = os.getenv('DEBUG_FORMATTING', 'false').lower() == 'true'
+PROXY_URL = os.getenv('PROXY_URL', '').strip()
+
+# === 🔹 СПИСОК БЕСПЛАТНЫХ ПРОКСИ (автоматический перебор) ===
+FREE_PROXIES = [
+    "http://51.159.113.50:3128",
+    "http://51.159.113.51:3128",
+    "http://51.159.113.52:3128",
+    "http://185.162.230.80:80",
+    "http://185.162.230.81:80",
+    "http://185.162.230.82:80",
+    "http://185.162.230.83:80",
+    "http://103.152.112.162:80",
+    "http://103.152.112.145:80",
+    "http://47.88.31.85:80",
+    "http://47.91.95.123:8080",
+    "http://103.167.135.110:80",
+    "http://103.167.135.111:80",
+    "http://185.217.136.235:1337",
+    "http://185.217.136.239:1337",
+]
 
 logger.info("="*80)
 logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (TELEGRAM -> MAX)")
 logger.info(f"👥 TG Group: {TELEGRAM_GROUP_ID}")
 logger.info(f"📢 MAX Channel: {MAX_CHANNEL_ID}")
 logger.info(f"🔍 DEBUG_FORMATTING: {DEBUG_FORMATTING}")
+logger.info(f"🔹 ПРОКСИ: {PROXY_URL if PROXY_URL else 'Будет использован список бесплатных'}")
 
 # 🔹 ПРОВЕРКА ПЕРЕМЕННЫХ
 missing = []
@@ -53,11 +74,59 @@ if missing:
 logger.info("✅ Все переменные установлены")
 logger.info("="*80)
 
-# 🔹 ИСПРАВЛЕНИЕ: Используем AiohttpSession или создаём бота без session
-timeout = aiohttp.ClientTimeout(total=30)
-session = AiohttpSession(timeout=timeout)
-telegram_bot = Bot(token=TELEGRAM_TOKEN, session=session)
-dp = Dispatcher()
+# === 🔹 ФУНКЦИЯ ПРОВЕРКИ ПРОКСИ ===
+async def test_proxy(proxy_url: str) -> bool:
+    """Проверяет работает ли прокси"""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get('https://api.telegram.org', proxy=proxy_url) as resp:
+                return resp.status == 200
+    except:
+        return False
+
+# === 🔹 ФУНКЦИЯ ПОИСКА РАБОЧЕГО ПРОКСИ ===
+async def find_working_proxy() -> Optional[str]:
+    """Перебирает список прокси и возвращает первый рабочий"""
+    
+    # Сначала проверяем пользовательский прокси
+    if PROXY_URL:
+        logger.info(f"🔍 Проверка пользовательского прокси: {PROXY_URL}")
+        if await test_proxy(PROXY_URL):
+            logger.info(f"✅ Пользовательский прокси работает!")
+            return PROXY_URL
+        else:
+            logger.warning(f"⚠️ Пользовательский прокси НЕ работает, пробуем бесплатные...")
+    
+    # Перебираем бесплатные прокси
+    logger.info(f"🔍 Перебор бесплатных прокси ({len(FREE_PROXIES)} шт)...")
+    
+    for i, proxy in enumerate(FREE_PROXIES, 1):
+        logger.debug(f"📍 Прокси {i}/{len(FREE_PROXIES)}: {proxy}")
+        if await test_proxy(proxy):
+            logger.info(f"✅ Найден рабочий прокси: {proxy}")
+            return proxy
+    
+    logger.warning("⚠️ Ни один прокси не работает!")
+    return None
+
+# === 🔹 СОЗДАНИЕ СЕССИИ С ПРОКСИ ===
+async def create_bot_session() -> AiohttpSession:
+    """Создаёт сессию с рабочим прокси"""
+    timeout = aiohttp.ClientTimeout(total=120)
+    
+    proxy = await find_working_proxy()
+    
+    if proxy:
+        logger.info(f"🔹 Создание сессии с прокси: {proxy}")
+        return AiohttpSession(timeout=timeout, proxy=proxy)
+    else:
+        logger.warning("⚠️ Создание сессии БЕЗ прокси (может не работать из РФ)")
+        return AiohttpSession(timeout=timeout)
+
+# Создаём сессию и бота
+session = None
+telegram_bot = None
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -141,7 +210,7 @@ class MediaUploader:
 
     async def ensure_session(self):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=60)
+            timeout = aiohttp.ClientTimeout(total=120)
             self.session = aiohttp.ClientSession(timeout=timeout)
             logger.info("🔗 Создана сессия MediaUploader")
 
@@ -301,17 +370,21 @@ class MediaUploader:
             return None
 
 class TelegramDownloader:
-    def __init__(self, token: str):
+    def __init__(self, token: str, proxy: str = None):
         self.token = token
         self.api_url = f"https://api.telegram.org/bot{token}"
         self.file_url = f"https://api.telegram.org/file/bot{token}"
+        self.proxy = proxy
         self.session = None
 
     async def ensure_session(self):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
-            logger.info("🔗 Создана сессия TelegramDownloader")
+            timeout = aiohttp.ClientTimeout(total=60)
+            if self.proxy:
+                self.session = aiohttp.ClientSession(timeout=timeout, proxy=self.proxy)
+            else:
+                self.session = aiohttp.ClientSession(timeout=timeout)
+            logger.info(f"🔗 Создана сессия TelegramDownloader{' с прокси' if self.proxy else ''}")
 
     async def get_file_info(self, file_id: str) -> dict:
         await self.ensure_session()
@@ -341,9 +414,9 @@ class TelegramDownloader:
             else:
                 raise Exception(f"Ошибка download: {resp.status}")
 
-# === ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ===
-uploader = MediaUploader(MAX_TOKEN)
-downloader = TelegramDownloader(TELEGRAM_TOKEN)
+# === ГЛОБАЛЬНЫЕ ОБЪЕКТЫ (создаются в main()) ===
+uploader = None
+downloader = None
 
 # === ОТПРАВКА В MAX ===
 async def send_to_max(text: str, attachments: List[dict] = None):
@@ -364,7 +437,7 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     logger.info(f"📤 MAX: текст={len(text)} симв., вложений={len(attachments) if attachments else 0}")
     
     try:
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=data) as resp:
                 response_text = await resp.text()
@@ -531,32 +604,59 @@ async def show_stats(message: types.Message):
 # === ОЧИСТКА ===
 async def cleanup():
     logger.info("🧹 Закрытие сессий...")
-    if downloader.session:
+    if downloader and downloader.session:
         await downloader.session.close()
-    if uploader.session:
+    if uploader and uploader.session:
         await uploader.session.close()
-    await telegram_bot.session.close()
+    if telegram_bot and telegram_bot.session:
+        await telegram_bot.session.close()
     logger.info("✅ Сессии закрыты")
 
 # === ЗАПУСК ===
 async def main():
-    retry = 0
-    max_retry = 3
-    while retry < max_retry:
-        try:
-            logger.info(f"🔌 Delete webhook (попытка {retry + 1}/{max_retry})...")
-            await telegram_bot.delete_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook удалён")
-            break
-        except Exception as e:
-            retry += 1
-            logger.warning(f"⚠️ Ошибка delete_webhook: {e}")
-            if retry < max_retry:
-                logger.info(f"⏳ Ждём 5 секунд...")
-                await asyncio.sleep(5)
-            else:
-                logger.error("❌ Не удалось удалить webhook после 3 попыток")
-                raise
+    global telegram_bot, uploader, downloader
+    
+    # 🔹 1. Находим рабочий прокси
+    proxy = await find_working_proxy()
+    
+    # 🔹 2. Создаём сессию и бота
+    timeout = aiohttp.ClientTimeout(total=120)
+    if proxy:
+        session = AiohttpSession(timeout=timeout, proxy=proxy)
+        logger.info(f"✅ Сессия создана с прокси")
+    else:
+        session = AiohttpSession(timeout=timeout)
+        logger.warning("⚠️ Сессия создана БЕЗ прокси")
+    
+    telegram_bot = Bot(token=TELEGRAM_TOKEN, session=session)
+    dp = Dispatcher()
+    
+    # 🔹 3. Инициализируем глобальные объекты
+    uploader = MediaUploader(MAX_TOKEN)
+    downloader = TelegramDownloader(TELEGRAM_TOKEN, proxy)
+    
+    # 🔹 4. Webhook — ОПЦИОНАЛЬНО
+    try:
+        logger.info("🔌 Попытка удалить webhook...")
+        await asyncio.wait_for(
+            telegram_bot.delete_webhook(drop_pending_updates=True),
+            timeout=60
+        )
+        logger.info("✅ Webhook удалён")
+    except asyncio.TimeoutError:
+        logger.warning("⏰ Timeout при удалении webhook — пропускаем")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось удалить webhook: {e} — продолжаем работу")
+    
+    # 🔹 5. Проверка соединения
+    try:
+        logger.info("🔍 Проверка соединения с Telegram...")
+        me = await telegram_bot.get_me()
+        logger.info(f"✅ Бот авторизован: @{me.username}")
+    except Exception as e:
+        logger.error(f"❌ Не удалось подключиться к Telegram: {e}")
+        logger.error("💡 Попробуйте перезапустить бота — прокси переберутся заново")
+        raise
     
     logger.info("✨ Polling запущен...")
     try:
