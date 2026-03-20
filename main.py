@@ -12,6 +12,7 @@ from aiogram.filters import Command
 from aiogram.utils.text_decorations import html_decoration
 from aiogram.client.session.aiohttp import AiohttpSession
 from typing import List, Tuple, Optional
+from aiohttp import web
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -117,7 +118,13 @@ class MediaUploader:
         self.token = token
         self.base_url = "https://platform-api.max.ru"
         self.session = None
-        self.stats = {"documents_ok": 0, "documents_failed": 0, "video_ok": 0, "video_failed": 0, "audio_ok": 0, "audio_failed": 0, "voice_ok": 0, "voice_failed": 0, "photo_ok": 0, "photo_failed": 0}
+        self.stats = {
+            "documents_ok": 0, "documents_failed": 0,
+            "video_ok": 0, "video_failed": 0,
+            "audio_ok": 0, "audio_failed": 0,
+            "voice_ok": 0, "voice_failed": 0,
+            "photo_ok": 0, "photo_failed": 0
+        }
 
     async def ensure_session(self):
         if not self.session:
@@ -367,45 +374,22 @@ async def show_stats(message: types.Message):
 
 # === ОЧИСТКА ===
 async def cleanup():
+    logger.info("🧹 Закрытие сессий...")
     if downloader and downloader.session:
         await downloader.session.close()
     if uploader and uploader.session:
         await uploader.session.close()
     if telegram_bot and telegram_bot.session:
         await telegram_bot.session.close()
+    logger.info("✅ Сессии закрыты")
 
-# === ЗАПУСК ===
-async def main():
-    global telegram_bot, uploader, downloader
-    
-    telegram_bot = Bot(token=TELEGRAM_TOKEN)
-    uploader = MediaUploader(MAX_TOKEN)
-    downloader = TelegramDownloader(TELEGRAM_TOKEN)
-    
-    try:
-        await asyncio.wait_for(telegram_bot.delete_webhook(drop_pending_updates=True), timeout=30)
-        logger.info("✅ Webhook удалён")
-    except Exception as e:
-        logger.warning(f"⚠️ Webhook: {e}")
-    
-    try:
-        me = await telegram_bot.get_me()
-        logger.info(f"✅ Бот авторизован: @{me.username}")
-    except Exception as e:
-        logger.error(f"❌ Telegram: {e}")
-        raise
-    
-    logger.info("✨ Polling запущен...")
-    try:
-        await dp.start_polling(telegram_bot)
-    finally:
-        await cleanup()
-
-# === HEALTH CHECK ENDPOINT (для UptimeRobot) ===
-from aiohttp import web
-
+# === HEALTH CHECK (для UptimeRobot) ===
 async def health_handler(request):
-    return web.json_response({"status": "ok", "bot": telegram_bot.username if telegram_bot else "not started"})
+    return web.json_response({
+        "status": "ok",
+        "bot": telegram_bot.username if telegram_bot else "not started",
+        "timestamp": asyncio.get_event_loop().time()
+    })
 
 async def start_web_server():
     app = web.Application()
@@ -417,15 +401,68 @@ async def start_web_server():
     logger.info("🏥 Health check запущен на порту 8080")
 
 # === ЗАПУСК ===
+async def main():
+    global telegram_bot, uploader, downloader
+    
+    # 🔹 Создаём бота
+    telegram_bot = Bot(token=TELEGRAM_TOKEN)
+    uploader = MediaUploader(MAX_TOKEN)
+    downloader = TelegramDownloader(TELEGRAM_TOKEN)
+    
+    # 🔹 Webhook
+    try:
+        await asyncio.wait_for(telegram_bot.delete_webhook(drop_pending_updates=True), timeout=30)
+        logger.info("✅ Webhook удалён")
+    except Exception as e:
+        logger.warning(f"⚠️ Webhook: {e}")
+    
+    # 🔹 Проверка соединения
+    try:
+        me = await telegram_bot.get_me()
+        logger.info(f"✅ Бот авторизован: @{me.username}")
+    except Exception as e:
+        logger.error(f"❌ Telegram: {e}")
+        raise
+    
+    logger.info("✨ Запуск polling...")
+    
+    # 🔹 ЗАПУСК POLLING С ЗАЩИТОЙ
+    polling_task = None
+    try:
+        # 🔹 КЛЮЧЕВОЕ: skip_updates=True сбрасывает старые обновления
+        polling_task = asyncio.create_task(
+            dp.start_polling(
+                telegram_bot,
+                allowed_updates=types.Update.__all__,
+                skip_updates=True
+            )
+        )
+        logger.info("✅ Polling запущен успешно")
+        
+        # Ждём завершения polling (никогда не произойдёт при нормальной работе)
+        await polling_task
+        
+    except asyncio.CancelledError:
+        logger.info("🛑 Polling остановлен")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка polling: {e}", exc_info=True)
+        raise
+    finally:
+        await cleanup()
+
+# === ЗАПУСК ===
 if __name__ == '__main__':
     try:
-        # Запускаем health check сервер + бота
+        # 🔹 Запускаем health check + бота
         async def run_all():
             await start_web_server()
             await main()
         
+        logger.info("🚀 Запуск всех сервисов...")
         asyncio.run(run_all())
+        
     except KeyboardInterrupt:
-        logger.info("🛑 Остановка...")
+        logger.info("🛑 Остановка по сигналу...")
     except Exception as e:
         logger.exception(f"❌ Критическая ошибка: {e}")
+        sys.exit(1)
