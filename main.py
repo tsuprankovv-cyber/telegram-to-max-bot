@@ -129,7 +129,8 @@ class MediaUploader:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=120)
             if self.proxy:
-                self.session = aiohttp.ClientSession(timeout=timeout, proxy=self.proxy)
+                connector = aiohttp.TCPConnector()
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
             else:
                 self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -235,7 +236,8 @@ class TelegramDownloader:
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=60)
             if self.proxy:
-                self.session = aiohttp.ClientSession(timeout=timeout, proxy=self.proxy)
+                connector = aiohttp.TCPConnector()
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
             else:
                 self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -268,7 +270,8 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     try:
         timeout = aiohttp.ClientTimeout(total=60)
         if PROXY_URL:
-            async with aiohttp.ClientSession(timeout=timeout, proxy=PROXY_URL) as session:
+            connector = aiohttp.TCPConnector()
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=PROXY_URL) as session:
                 async with session.post(url, headers=headers, json=data) as resp:
                     if resp.status == 200:
                         logger.info("✅ Отправлено в MAX")
@@ -402,14 +405,14 @@ async def cleanup():
 async def main():
     global telegram_bot, uploader, downloader
     
-    # 🔹 Создаём сессию для бота ЧЕРЕЗ ПРОКСИ (без AiohttpSession)
+    # 🔹 Создаём сессию для бота ЧЕРЕЗ ПРОКСИ
     timeout = aiohttp.ClientTimeout(total=120)
     
     if PROXY_URL:
         logger.info(f"🔹 Создаём сессию с прокси: {PROXY_URL}")
-        # Создаём aiohttp сессию с прокси
-        aiohttp_session = aiohttp.ClientSession(timeout=timeout, proxy=PROXY_URL)
-        # Передаём в aiogram через AiohttpSession wrapper
+        # 🔹 ИСПРАВЛЕНИЕ: используем connector + proxy
+        connector = aiohttp.TCPConnector()
+        aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=PROXY_URL)
         session = AiohttpSession(aiohttp_session)
     else:
         logger.warning("⚠️ Прокси не настроен!")
