@@ -10,9 +10,9 @@ import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.text_decorations import html_decoration
-from aiogram.client.session.aiohttp import AiohttpSession
-from typing import List, Tuple, Optional
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
+from typing import List, Tuple, Optional
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
@@ -30,11 +30,13 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
 TELEGRAM_GROUP_ID = os.getenv('TELEGRAM_GROUP_ID', '').strip()
 MAX_TOKEN = os.getenv('MAX_TOKEN', '').strip()
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID', '').strip()
+BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://telegram-to-max-bot.onrender.com')
 
 logger.info("="*80)
 logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (TELEGRAM -> MAX)")
 logger.info(f"👥 TG Group: {TELEGRAM_GROUP_ID}")
 logger.info(f"📢 MAX Channel: {MAX_CHANNEL_ID}")
+logger.info(f"🔗 Webhook URL: {BASE_URL}")
 
 # 🔹 ПРОВЕРКА ПЕРЕМЕННЫХ
 missing = []
@@ -52,10 +54,8 @@ if missing:
 logger.info("✅ Все переменные установлены")
 logger.info("="*80)
 
-# === СОЗДАЁМ DP СРАЗУ ===
+# === СОЗДАЁМ DP И БОТА ===
 dp = Dispatcher()
-
-# === ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ===
 telegram_bot = None
 uploader = None
 downloader = None
@@ -372,6 +372,20 @@ async def show_stats(message: types.Message):
         parse_mode="Markdown"
     )
 
+# === HEALTH CHECK (для UptimeRobot) ===
+async def health_handler(request):
+    return web.json_response({
+        "status": "ok",
+        "bot": telegram_bot.username if telegram_bot else "not started"
+    })
+
+# === WEBHOOK HANDLER ===
+async def webhook_handler(request):
+    update = await request.json()
+    update = types.Update(**update)
+    await dp.feed_update(telegram_bot, update)
+    return web.json_response({"ok": True})
+
 # === ОЧИСТКА ===
 async def cleanup():
     logger.info("🧹 Закрытие сессий...")
@@ -379,79 +393,48 @@ async def cleanup():
         await downloader.session.close()
     if uploader and uploader.session:
         await uploader.session.close()
-    if telegram_bot and telegram_bot.session:
-        await telegram_bot.session.close()
-    logger.info("✅ Сессии закрыты")
-
-# === HEALTH CHECK (для UptimeRobot) ===
-async def health_handler(request):
-    return web.json_response({
-        "status": "ok",
-        "bot": telegram_bot.username if telegram_bot else "not started",
-        "timestamp": asyncio.get_event_loop().time()
-    })
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/health', health_handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info("🏥 Health check запущен на порту 8080")
 
 # === ЗАПУСК ===
-async def main():
+async def on_startup(app: web.Application):
     global telegram_bot, uploader, downloader
     
-    # 🔹 Создаём бота
     telegram_bot = Bot(token=TELEGRAM_TOKEN)
     uploader = MediaUploader(MAX_TOKEN)
     downloader = TelegramDownloader(TELEGRAM_TOKEN)
     
-    # 🔹 Webhook
+    # 🔹 Устанавливаем webhook
+    webhook_url = f"{BASE_URL}/webhook"
     try:
-        await asyncio.wait_for(telegram_bot.delete_webhook(drop_pending_updates=True), timeout=30)
-        logger.info("✅ Webhook удалён")
+        await telegram_bot.set_webhook(webhook_url, allowed_updates=types.Update.__all__)
+        logger.info(f"✅ Webhook установлен: {webhook_url}")
     except Exception as e:
-        logger.warning(f"⚠️ Webhook: {e}")
-    
-    # 🔹 Проверка соединения
-    try:
-        me = await telegram_bot.get_me()
-        logger.info(f"✅ Бот авторизован: @{me.username}")
-    except Exception as e:
-        logger.error(f"❌ Telegram: {e}")
+        logger.error(f"❌ Ошибка установки webhook: {e}")
         raise
     
-    logger.info("✨ Запуск polling...")
-    
-    # 🔹 ЗАПУСК POLLING (БЕЗ __all__!)
-    try:
-        # 🔹 skip_updates=True сбрасывает старые обновления
-        await dp.start_polling(telegram_bot, skip_updates=True)
-        logger.info("✅ Polling запущен успешно")
-    except asyncio.CancelledError:
-        logger.info("🛑 Polling остановлен")
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка polling: {e}", exc_info=True)
-        raise
-    finally:
-        await cleanup()
+    logger.info(f"✅ Бот авторизован: @{telegram_bot.username}")
+    logger.info("✨ Webhook режим запущен...")
+
+async def on_shutdown(app: web.Application):
+    await cleanup()
+    if telegram_bot:
+        await telegram_bot.session.close()
+
+# === СОЗДАНИЕ WEB APP ===
+def create_app():
+    app = web.Application()
+    app.router.add_get('/health', health_handler)
+    app.router.add_post('/webhook', webhook_handler)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
 
 # === ЗАПУСК ===
 if __name__ == '__main__':
     try:
-        # 🔹 Запускаем health check + бота
-        async def run_all():
-            await start_web_server()
-            await main()
-        
-        logger.info("🚀 Запуск всех сервисов...")
-        asyncio.run(run_all())
-        
+        logger.info("🚀 Запуск webhook сервера...")
+        web.run_app(create_app(), host='0.0.0.0', port=8080)
     except KeyboardInterrupt:
-        logger.info("🛑 Остановка по сигналу...")
+        logger.info("🛑 Остановка...")
     except Exception as e:
         logger.exception(f"❌ Критическая ошибка: {e}")
         sys.exit(1)
