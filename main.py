@@ -32,7 +32,7 @@ MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID', '').strip()
 DEBUG_FORMATTING = os.getenv('DEBUG_FORMATTING', 'false').lower() == 'true'
 PROXY_URL = os.getenv('PROXY_URL', '').strip()
 
-# === 🔹 СПИСОК БЕСПЛАТНЫХ ПРОКСИ (автоматический перебор) ===
+# === 🔹 СПИСОК БЕСПЛАТНЫХ ПРОКСИ ===
 FREE_PROXIES = [
     "http://51.159.113.50:3128",
     "http://51.159.113.51:3128",
@@ -89,7 +89,6 @@ async def test_proxy(proxy_url: str) -> bool:
 async def find_working_proxy() -> Optional[str]:
     """Перебирает список прокси и возвращает первый рабочий"""
     
-    # Сначала проверяем пользовательский прокси
     if PROXY_URL:
         logger.info(f"🔍 Проверка пользовательского прокси: {PROXY_URL}")
         if await test_proxy(PROXY_URL):
@@ -98,7 +97,6 @@ async def find_working_proxy() -> Optional[str]:
         else:
             logger.warning(f"⚠️ Пользовательский прокси НЕ работает, пробуем бесплатные...")
     
-    # Перебираем бесплатные прокси
     logger.info(f"🔍 Перебор бесплатных прокси ({len(FREE_PROXIES)} шт)...")
     
     for i, proxy in enumerate(FREE_PROXIES, 1):
@@ -110,23 +108,13 @@ async def find_working_proxy() -> Optional[str]:
     logger.warning("⚠️ Ни один прокси не работает!")
     return None
 
-# === 🔹 СОЗДАНИЕ СЕССИИ С ПРОКСИ ===
-async def create_bot_session() -> AiohttpSession:
-    """Создаёт сессию с рабочим прокси"""
-    timeout = aiohttp.ClientTimeout(total=120)
-    
-    proxy = await find_working_proxy()
-    
-    if proxy:
-        logger.info(f"🔹 Создание сессии с прокси: {proxy}")
-        return AiohttpSession(timeout=timeout, proxy=proxy)
-    else:
-        logger.warning("⚠️ Создание сессии БЕЗ прокси (может не работать из РФ)")
-        return AiohttpSession(timeout=timeout)
+# === 🔹 СОЗДАЁМ DP СРАЗУ (до декораторов!) ===
+dp = Dispatcher()
 
-# Создаём сессию и бота
-session = None
+# === ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ===
 telegram_bot = None
+uploader = None
+downloader = None
 
 # === ТРАНСЛИТЕРАЦИЯ ===
 TRANSLIT_DICT = {
@@ -414,10 +402,6 @@ class TelegramDownloader:
             else:
                 raise Exception(f"Ошибка download: {resp.status}")
 
-# === ГЛОБАЛЬНЫЕ ОБЪЕКТЫ (создаются в main()) ===
-uploader = None
-downloader = None
-
 # === ОТПРАВКА В MAX ===
 async def send_to_max(text: str, attachments: List[dict] = None):
     url = f"https://platform-api.max.ru/messages?chat_id={MAX_CHANNEL_ID}"
@@ -629,7 +613,6 @@ async def main():
         logger.warning("⚠️ Сессия создана БЕЗ прокси")
     
     telegram_bot = Bot(token=TELEGRAM_TOKEN, session=session)
-    dp = Dispatcher()
     
     # 🔹 3. Инициализируем глобальные объекты
     uploader = MediaUploader(MAX_TOKEN)
