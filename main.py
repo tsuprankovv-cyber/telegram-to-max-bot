@@ -29,13 +29,11 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '').strip()
 TELEGRAM_GROUP_ID = os.getenv('TELEGRAM_GROUP_ID', '').strip()
 MAX_TOKEN = os.getenv('MAX_TOKEN', '').strip()
 MAX_CHANNEL_ID = os.getenv('MAX_CHANNEL_ID', '').strip()
-PROXY_URL = os.getenv('PROXY_URL', '').strip()
 
 logger.info("="*80)
 logger.info("🚀 ЗАПУСК БОТА-ПЕРЕСЫЛЬЩИКА (TELEGRAM -> MAX)")
 logger.info(f"👥 TG Group: {TELEGRAM_GROUP_ID}")
 logger.info(f"📢 MAX Channel: {MAX_CHANNEL_ID}")
-logger.info(f"🔹 ПРОКСИ: {PROXY_URL if PROXY_URL else 'НЕ НАСТРОЕН!'}")
 
 # 🔹 ПРОВЕРКА ПЕРЕМЕННЫХ
 missing = []
@@ -49,9 +47,6 @@ if missing:
     for var in missing:
         logger.error(f"   - {var}")
     raise ValueError(f"Missing: {', '.join(missing)}")
-
-if not PROXY_URL:
-    logger.warning("⚠️ PROXY_URL не настроен!")
 
 logger.info("✅ Все переменные установлены")
 logger.info("="*80)
@@ -118,21 +113,15 @@ def format_text(telegram_text: str, entities: list, message_id: int = None) -> s
 
 # === ЗАГРУЗКА МЕДИА ===
 class MediaUploader:
-    def __init__(self, token: str, proxy: str = None):
+    def __init__(self, token: str):
         self.token = token
         self.base_url = "https://platform-api.max.ru"
-        self.proxy = proxy
         self.session = None
         self.stats = {"documents_ok": 0, "documents_failed": 0, "video_ok": 0, "video_failed": 0, "audio_ok": 0, "audio_failed": 0, "voice_ok": 0, "voice_failed": 0, "photo_ok": 0, "photo_failed": 0}
 
     async def ensure_session(self):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=120)
-            if self.proxy:
-                connector = aiohttp.TCPConnector()
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
-            else:
-                self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
 
     async def create_upload(self, media_type: str) -> dict:
         await self.ensure_session()
@@ -225,21 +214,15 @@ class MediaUploader:
         return None
 
 class TelegramDownloader:
-    def __init__(self, token: str, proxy: str = None):
+    def __init__(self, token: str):
         self.token = token
         self.api_url = f"https://api.telegram.org/bot{token}"
         self.file_url = f"https://api.telegram.org/file/bot{token}"
-        self.proxy = proxy
         self.session = None
 
     async def ensure_session(self):
         if not self.session:
-            timeout = aiohttp.ClientTimeout(total=60)
-            if self.proxy:
-                connector = aiohttp.TCPConnector()
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=self.proxy)
-            else:
-                self.session = aiohttp.ClientSession(timeout=timeout)
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
 
     async def get_file_info(self, file_id: str) -> dict:
         await self.ensure_session()
@@ -269,23 +252,13 @@ async def send_to_max(text: str, attachments: List[dict] = None):
     
     try:
         timeout = aiohttp.ClientTimeout(total=60)
-        if PROXY_URL:
-            connector = aiohttp.TCPConnector()
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=PROXY_URL) as session:
-                async with session.post(url, headers=headers, json=data) as resp:
-                    if resp.status == 200:
-                        logger.info("✅ Отправлено в MAX")
-                        return True
-                    logger.error(f"❌ MAX {resp.status}: {await resp.text()[:500]}")
-                    return False
-        else:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=data) as resp:
-                    if resp.status == 200:
-                        logger.info("✅ Отправлено в MAX")
-                        return True
-                    logger.error(f"❌ MAX {resp.status}: {await resp.text()[:500]}")
-                    return False
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=data) as resp:
+                if resp.status == 200:
+                    logger.info("✅ Отправлено в MAX")
+                    return True
+                logger.error(f"❌ MAX {resp.status}: {await resp.text()[:500]}")
+                return False
     except Exception as e:
         logger.error(f"❌ send_to_max: {e}")
         return False
@@ -405,37 +378,21 @@ async def cleanup():
 async def main():
     global telegram_bot, uploader, downloader
     
-    # 🔹 Создаём сессию для бота ЧЕРЕЗ ПРОКСИ
-    timeout = aiohttp.ClientTimeout(total=120)
+    telegram_bot = Bot(token=TELEGRAM_TOKEN)
+    uploader = MediaUploader(MAX_TOKEN)
+    downloader = TelegramDownloader(TELEGRAM_TOKEN)
     
-    if PROXY_URL:
-        logger.info(f"🔹 Создаём сессию с прокси: {PROXY_URL}")
-        # 🔹 ИСПРАВЛЕНИЕ: используем connector + proxy
-        connector = aiohttp.TCPConnector()
-        aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector, proxy=PROXY_URL)
-        session = AiohttpSession(aiohttp_session)
-    else:
-        logger.warning("⚠️ Прокси не настроен!")
-        session = AiohttpSession(timeout=timeout)
-    
-    telegram_bot = Bot(token=TELEGRAM_TOKEN, session=session)
-    uploader = MediaUploader(MAX_TOKEN, PROXY_URL)
-    downloader = TelegramDownloader(TELEGRAM_TOKEN, PROXY_URL)
-    
-    # Webhook — опционально
     try:
         await asyncio.wait_for(telegram_bot.delete_webhook(drop_pending_updates=True), timeout=30)
         logger.info("✅ Webhook удалён")
     except Exception as e:
         logger.warning(f"⚠️ Webhook: {e}")
     
-    # Проверка соединения
     try:
         me = await telegram_bot.get_me()
         logger.info(f"✅ Бот авторизован: @{me.username}")
     except Exception as e:
         logger.error(f"❌ Telegram: {e}")
-        logger.error("💡 Прокси не работает или неверные данные")
         raise
     
     logger.info("✨ Polling запущен...")
@@ -444,9 +401,30 @@ async def main():
     finally:
         await cleanup()
 
+# === HEALTH CHECK ENDPOINT (для UptimeRobot) ===
+from aiohttp import web
+
+async def health_handler(request):
+    return web.json_response({"status": "ok", "bot": telegram_bot.username if telegram_bot else "not started"})
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/health', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("🏥 Health check запущен на порту 8080")
+
+# === ЗАПУСК ===
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        # Запускаем health check сервер + бота
+        async def run_all():
+            await start_web_server()
+            await main()
+        
+        asyncio.run(run_all())
     except KeyboardInterrupt:
         logger.info("🛑 Остановка...")
     except Exception as e:
